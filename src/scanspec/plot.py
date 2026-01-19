@@ -18,13 +18,29 @@ from .specs import Ellipse, Polygon, Spec
 __all__ = ["plot_spec"]
 
 
-def _plot_arrays(axes: Axes, arrays: list[npt.NDArray[np.float64]], **kwargs: Any):
+def _plot_arrays(
+    axes: Axes,
+    arrays: list[npt.NDArray[np.float64]],
+    labels: Any | None = None,
+    **kwargs: Any,
+):
     if len(arrays) > 2:
         axes.plot3D(arrays[2], arrays[1], arrays[0], **kwargs)  # type: ignore
+        if labels is not None:
+            for xi, yi, zi, label in zip(
+                arrays[2], arrays[1], arrays[0], labels, strict=False
+            ):
+                axes.text(xi, yi, zi, label)
     elif len(arrays) == 2:
         axes.plot(arrays[1], arrays[0], **kwargs)  # type: ignore
+        if labels is not None:
+            for xi, yi, label in zip(arrays[1], arrays[0], labels, strict=False):
+                axes.text(xi, yi, label)
     else:
         axes.plot(arrays[0], np.zeros(len(arrays[0])), **kwargs)  # type: ignore
+        if labels is not None:
+            for xi, label in zip(arrays[0], labels, strict=False):
+                axes.text(xi, 0, label)
 
 
 # https://stackoverflow.com/a/11156353
@@ -126,7 +142,7 @@ def _get_boundaries(spec: Spec[Any]) -> Generator[patches.Patch, None, None]:
                 yield from _get_boundaries(s)  # type: ignore
 
 
-def plot_spec(spec: Spec[Any], title: str | None = None):
+def plot_spec(spec: Spec[Any], title: str | None = None, labels: Any = None):
     """Plot a spec, drawing the path taken through the scan.
 
     Uses a different colour for each frame, grey for the turnarounds.
@@ -244,7 +260,14 @@ def plot_spec(spec: Spec[Any], title: str | None = None):
     # Plot the capture points
     if len(dim) < 200:
         arrays = [dim.midpoints[a] for a in axes]
-        _plot_arrays(plt_axes, arrays, linestyle="", marker=".", color="k")
+        _plot_arrays(
+            plt_axes,
+            arrays,
+            linestyle="",
+            marker=".",
+            color="k",
+            labels=range(len(dim)) if labels is None else labels,
+        )
 
     # Plot the end
     _plot_arrays(

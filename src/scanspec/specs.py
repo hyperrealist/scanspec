@@ -977,13 +977,13 @@ class Ellipse(Spec[Axis]):
         )
 
         # Construct directed Range objects
-        x_dim = Range(
+        self.x_dim = Range(
             self.x_axis,
             self.x_centre - x_radius,
             self.x_centre + x_radius,
             self.x_step,
         )
-        y_dim = Range(
+        self.y_dim = Range(
             self.y_axis,
             self.y_centre - y_radius,
             self.y_centre + y_radius,
@@ -991,7 +991,7 @@ class Ellipse(Spec[Axis]):
         )
 
         # Construct grid
-        grid = _build_2d_grid(x_dim, y_dim, self.snake, self.vertical)
+        grid = _build_2d_grid(self.x_dim, self.y_dim, self.snake, self.vertical)
 
         return _compute_masked_frames(grid, bounds, nested, self._mask)
 
@@ -1078,13 +1078,13 @@ class Polygon(Spec[Axis]):
         y_start, y_stop = self._bounds(1)
 
         # Construct directed Range objects
-        x_dim = Range(
+        self.x_dim = Range(
             self.x_axis,
             x_start,
             x_stop,
             self.x_step,
         )
-        y_dim = Range(
+        self.y_dim = Range(
             self.y_axis,
             y_start,
             y_stop,
@@ -1092,6 +1092,6 @@ class Polygon(Spec[Axis]):
         )
 
         # Construct grid
-        grid = _build_2d_grid(x_dim, y_dim, self.snake, self.vertical)
+        grid = _build_2d_grid(self.x_dim, self.y_dim, self.snake, self.vertical)
 
         return _compute_masked_frames(grid, bounds, nested, self._mask)
