@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import numpy as np
 from matplotlib.figure import Figure
 
 from scanspec.v2.core import (
@@ -96,6 +97,26 @@ def test_plot_flagship_multi_stream_legend_and_lines():
     assert legend is not None
     labels = {t.get_text() for t in legend.get_texts()}
     assert labels == {"diff", "spec"}
+
+
+def test_plot_flagship_multi_stream_stays_within_physical_range():
+    """Regression: a reversing fly-forward/fly-reverse run must not overshoot.
+
+    Drawing this as one global parametric spline across the whole run (an
+    earlier version of this module did) is numerically fragile once the
+    forward and reverse legs meet at floating-point-identical boundaries
+    many times in a row -- scipy's chord-length parameterisation degenerates
+    and the fitted curve overshoots far outside the real [7.0, 7.1] range.
+    """
+    spec = _flagship_multi_stream_spec()
+    fig = plot_spec(spec, fig=Figure(), max_trigger_markers=0)
+    xdata = [np.asarray(line.get_xdata()) for line in fig.axes[0].lines]
+    all_x = np.concatenate([x for x in xdata if x.size])
+    # True range (with fence/post half-step boundaries) is
+    # [6.99737, 7.10263]; give it a little headroom but stay far tighter
+    # than the ~7.115 overshoot the old global-spline bug produced.
+    assert all_x.min() >= 6.99
+    assert all_x.max() <= 7.11
 
 
 def test_plot_maximal_multirate_trigger_markers_placed():

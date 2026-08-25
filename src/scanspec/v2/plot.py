@@ -26,7 +26,6 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d import proj3d  # type: ignore
-from scipy import interpolate  # type: ignore
 
 from .core import (
     ConcatSource,
@@ -102,43 +101,6 @@ def _plot_arrow(axes: Axes, arrays: list[npt.NDArray[np.float64]]):
         axes.add_artist(a)
 
 
-def _plot_spline(
-    axes: Axes,
-    ranges: list[float],
-    arrays: list[npt.NDArray[np.float64]],
-    index_colours: dict[int, str],
-) -> list[list[npt.NDArray[np.float64]]]:
-    """Fit and draw a parametric spline through *arrays*, coloured in pieces.
-
-    ``index_colours`` maps a starting index in ``arrays`` to the colour of
-    the piece beginning there (piece extends to the next key, or the end).
-    """
-    scaled_arrays = [a / r for a, r in zip(arrays, ranges, strict=False)]
-    t = np.zeros(len(arrays[0]))
-    t[1:] = np.sqrt(sum((arr[1:] - arr[:-1]) ** 2 for arr in scaled_arrays))
-    t = np.cumsum(t)
-    if t[-1] == 0:
-        return []
-    for s, r in zip(scaled_arrays, ranges, strict=False):
-        if s[0] == s[-1]:
-            s += np.linspace(0, r * 1e-7, len(s))
-    t /= t[-1]
-    k = min(2, len(arrays[0]) - 1)
-    tck, _ = interpolate.splprep(scaled_arrays, k=k, s=0)  # type: ignore
-    starts = sorted(index_colours)
-    stops = starts[1:] + [len(arrays[0]) - 1]
-    pieces: list[list[npt.NDArray[np.float64]]] = []
-    for start, stop in zip(starts, stops, strict=False):
-        start_value: float = t[start]
-        stop_value: float = t[stop]
-        tnew = np.linspace(start_value, stop_value, num=1001)
-        spline: npt.NDArray[np.float64] = interpolate.splev(tnew, tck)  # type: ignore
-        unscaled = [a * r for a, r in zip(spline, ranges, strict=False)]
-        _plot_arrays(axes, list(unscaled), color=index_colours[start])  # type: ignore
-        pieces.append(unscaled)  # type: ignore
-    return pieces
-
-
 def _get_boundaries(spec: Spec[Any, Any, Any]) -> Iterator[patches.Patch]:
     if isinstance(spec, Ellipse):
         xy = spec.x_centre, spec.y_centre
@@ -180,40 +142,6 @@ def _flatten_axes(scan: Scan[Any, Any, Any]) -> list[Any]:
     for gen in scan.generators:
         _collect(gen)
     return axes
-
-
-def _axis_ranges(scan: Scan[Any, Any, Any], axes: list[Any]) -> dict[Any, float]:
-    """Per-axis (max - min) over every window, without storing position arrays."""
-    lo = dict.fromkeys(axes, float("inf"))
-    hi = dict.fromkeys(axes, float("-inf"))
-    last: dict[Any, float] = {}
-    for window in scan:
-        for ax in axes:
-            for pos in _window_axis_bounds(window, ax, last):
-                lo[ax] = min(lo[ax], pos)
-                hi[ax] = max(hi[ax], pos)
-        _advance(window, axes, last)
-    return {ax: max(hi[ax] - lo[ax], 1e-4) for ax in axes}
-
-
-def _window_axis_bounds(window: Window[Any, Any], ax: Any, last: dict[Any, float]):
-    if ax in window.moving_axes:
-        am = window.moving_axes[ax]
-        yield am.start_position
-        yield am.end_position
-    elif ax in window.static_axes:
-        yield window.static_axes[ax]
-    elif ax in last:
-        yield last[ax]
-
-
-def _advance(window: Window[Any, Any], axes: list[Any], last: dict[Any, float]) -> None:
-    """Update *last* (last-known position per axis) after visiting *window*."""
-    for ax in axes:
-        if ax in window.moving_axes:
-            last[ax] = window.moving_axes[ax].end_position
-        elif ax in window.static_axes:
-            last[ax] = window.static_axes[ax]
 
 
 def _detector_stream_map(scan: Scan[Any, Any, Any]) -> dict[Any, str]:
@@ -344,7 +272,6 @@ def plot_scan(
     """
     axis_labels = _flatten_axes(scan)
     ndims = len(axis_labels)
-    ranges = _axis_ranges(scan, axis_labels)
     detector_to_stream = _detector_stream_map(scan)
     stream_colours = _stream_colours(scan)
 
@@ -361,7 +288,7 @@ def plot_scan(
             axes.add_patch(patch)
 
     trigger_markers = _draw_path_and_streams(
-        axes, scan, axis_labels, ranges, detector_to_stream, stream_colours
+        axes, scan, axis_labels, detector_to_stream, stream_colours
     )
     if len(trigger_markers) <= max_trigger_markers:
         _draw_trigger_markers(axes, trigger_markers)
@@ -457,59 +384,50 @@ def _draw_path_and_streams(
     axes: Axes,
     scan: Scan[Any, Any, Any],
     axis_labels: list[Any],
-    ranges: dict[Any, float],
     detector_to_stream: dict[Any, str],
     stream_colours: dict[str, str],
 ) -> list[tuple[dict[Any, float], str]]:
-    """Draw contiguous path runs (spline + turnaround arrows); collect trigger markers.
+    """Draw the motion path window by window; collect trigger markers.
+
+    Each window's own points are joined by a straight line (or drawn as a
+    single marker, for a step window's one physical point); consecutive
+    windows are bridged by a plain line when contiguous, or a dashed
+    turnaround arrow when their positions jump. Deliberately *not* one
+    global spline fit across the whole scan: a run can reverse direction
+    many times (e.g. repeated fly-forward/fly-reverse legs meeting at
+    floating-point-identical boundaries), which is numerically fragile to
+    fit as a single parametric spline (near-duplicate/zero-distance knots
+    make scipy's chord-length parameterisation ill-conditioned, producing
+    wild overshoot rather than an error).
 
     Returns a list of (position, colour) for every trigger instant, deferred
     to the caller so the total count can be checked against the marker cap
     before actually plotting them.
     """
     last: dict[Any, float] = {}
-    run_arrays: dict[Any, list[float]] = {ax: [] for ax in axis_labels}
-    run_colours: dict[int, str] = {}
-    run_index = 0
     trigger_markers: list[tuple[dict[Any, float], str]] = []
     first_window = True
-
-    def flush_run() -> None:
-        nonlocal run_arrays, run_colours, run_index
-        if run_index == 0:
-            return
-        arrays = [np.array(run_arrays[ax]) for ax in axis_labels] or [
-            np.zeros(run_index)
-        ]
-        ranges_list = [ranges[ax] for ax in axis_labels] or [1.0]
-        _draw_run(axes, ranges_list, arrays, run_colours)
-        run_arrays = {ax: [] for ax in axis_labels}
-        run_colours = {}
-        run_index = 0
 
     for window in scan:
         window_points = _window_points(window, axis_labels, last)
         start_pos = window_points[0]
-
-        gap = not first_window and any(
-            ax in last
-            and ax in start_pos
-            and not isclose(last[ax], start_pos[ax], rel_tol=1e-9, abs_tol=1e-9)
-            for ax in axis_labels
-        )
-        if gap:
-            turnaround_from = dict(last)
-            flush_run()
-            _draw_turnaround(axes, axis_labels, turnaround_from, start_pos)
-
         colour = _window_colour(
             _window_streams(window, detector_to_stream), stream_colours
         )
-        run_colours[run_index] = colour
-        for pt in window_points:
-            for ax in axis_labels:
-                run_arrays[ax].append(pt.get(ax, last.get(ax, 0.0)))
-            run_index += 1
+
+        if not first_window:
+            gap = any(
+                ax in last
+                and ax in start_pos
+                and not isclose(last[ax], start_pos[ax], rel_tol=1e-9, abs_tol=1e-9)
+                for ax in axis_labels
+            )
+            if gap:
+                _draw_turnaround(axes, axis_labels, last, start_pos)
+            else:
+                _draw_segment(axes, axis_labels, [last, start_pos], colour)
+
+        _draw_segment(axes, axis_labels, window_points, colour)
 
         for ts in window.trigger_sequences:
             for t, det in _trigger_marker_times(ts):
@@ -550,25 +468,26 @@ def _draw_path_and_streams(
         last = dict(window_points[-1])
         first_window = False
 
-    flush_run()
     return trigger_markers
 
 
-def _draw_run(
+def _draw_segment(
     axes: Axes,
-    ranges_list: list[float],
-    arrays: list[npt.NDArray[np.float64]],
-    index_colours: dict[int, str],
+    axis_labels: list[Any],
+    points: list[dict[Any, float]],
+    colour: str,
 ) -> None:
-    if len(arrays[0]) == 1:
-        _plot_arrays(
-            axes,
-            [np.array([v]) for v in [a[0] for a in arrays]],
-            marker=5,
-            color=next(iter(index_colours.values()), "lightgrey"),
-        )
+    """Draw a straight line through *points* (or a single marker for one point)."""
+    if len(points) == 1:
+        arrays = [np.array([points[0].get(ax, 0.0)]) for ax in axis_labels] or [
+            np.zeros(1)
+        ]
+        _plot_arrays(axes, arrays, marker=".", color=colour)
         return
-    _plot_spline(axes, ranges_list, arrays, index_colours)
+    arrays = [np.array([p.get(ax, 0.0) for p in points]) for ax in axis_labels] or [
+        np.zeros(len(points))
+    ]
+    _plot_arrays(axes, arrays, color=colour)
 
 
 def _draw_turnaround(
