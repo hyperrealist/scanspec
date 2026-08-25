@@ -9,6 +9,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import numpy as np
+from matplotlib import patches as mpl_patches
 from matplotlib.figure import Figure
 
 from scanspec.v2.core import (
@@ -18,7 +19,7 @@ from scanspec.v2.core import (
     TriggerRepeat,
     TriggerSequence,
 )
-from scanspec.v2.plot import plot_scan, plot_spec
+from scanspec.v2.plot import plot_path, plot_scan, plot_spec, plot_timeline
 from scanspec.v2.specs import (
     Acquire,
     Ellipse,
@@ -51,11 +52,40 @@ def _flagship_multi_stream_spec() -> Repeat[str, str, str]:
     return Repeat(diff_acq.concat(spec_fwd).concat(spec_rev), num=3)
 
 
+def _maximal_multirate_spec() -> Acquire[str, str, str]:
+    return Acquire(
+        Product(Linspace("y", 0, 5, 3), ~Linspace("x", 0, 10, 4)),
+        fly=True,
+        detectors=[
+            DetectorGroup(1, 1, 0.003, 0.001, ["saxs", "waxs"]),
+            DetectorGroup(10, 1, 0.000299992, 8e-9, ["timestamp", "x_enc", "y_enc"]),
+        ],
+        trigger_sequence=TriggerSequence(
+            detectors=frozenset({"saxs", "waxs"}),
+            trigger_repeat=TriggerRepeat(num=4, livetime=0.003, deadtime=0.001),
+            children=[
+                TriggerChild(
+                    detectors=frozenset({"timestamp", "x_enc", "y_enc"}),
+                    repeats=[
+                        TriggerRepeat(num=10, livetime=0.000299992, deadtime=8e-9)
+                    ],
+                ),
+            ],
+        ),
+        monitors=[MonitorStream("temperature", "tc1")],
+    )
+
+
+# ---------------------------------------------------------------------------
+# plot_path (no detectors -> single-panel plot_scan/plot_spec too)
+# ---------------------------------------------------------------------------
+
+
 def test_plot_scan_step_2d_returns_figure_with_lines():
     scan = (Linspace("y", 0, 5, 3) * ~Linspace("x", 0, 10, 4)).compile()
     fig = plot_scan(scan, fig=Figure())
     assert isinstance(fig, Figure)
-    assert len(fig.axes) == 1
+    assert len(fig.axes) == 1  # no detectors -> no timeline panel
     assert len(fig.axes[0].lines) > 0
     assert fig.axes[0].get_xlabel() == "x"
     assert fig.axes[0].get_ylabel() == "y"
@@ -71,32 +101,63 @@ def test_plot_scan_fly_3d():
 def test_plot_spec_ellipse_boundary_overlay():
     spec = Ellipse("x", 1, 1.8, 0.2, "y", 2)
     fig = plot_spec(spec, fig=Figure())
-    assert len(fig.axes[0].patches) >= 1
+    boundary_patches = [
+        p for p in fig.axes[0].patches if isinstance(p, mpl_patches.Ellipse)
+    ]
+    assert len(boundary_patches) >= 1
 
 
 def test_plot_spec_polygon_boundary_overlay():
     spec = Polygon("x", "y", [(0, 0), (1, 0), (1, 1), (0, 1)], 0.1)
     fig = plot_spec(spec, fig=Figure())
-    assert len(fig.axes[0].patches) >= 1
+    boundary_patches = [
+        p for p in fig.axes[0].patches if isinstance(p, mpl_patches.Polygon)
+    ]
+    assert len(boundary_patches) >= 1
 
 
 def test_plot_scan_has_no_boundary_overlay_without_spec():
-    """plot_scan (no spec passed) can't walk a spec tree for regions."""
+    """plot_scan (no spec passed) can't walk a spec tree for regions.
+
+    Turnaround arrows are also Patches now (FancyArrowPatch), so check
+    specifically for boundary-shape patches rather than patch count.
+    """
     spec = Ellipse("x", 1, 1.8, 0.2, "y", 2)
     scan = spec.compile()
     fig = plot_scan(scan, fig=Figure())
-    assert len(fig.axes[0].patches) == 0
+    boundary_patches = [
+        p
+        for p in fig.axes[0].patches
+        if isinstance(p, mpl_patches.Ellipse | mpl_patches.Polygon)
+    ]
+    assert len(boundary_patches) == 0
 
 
-def test_plot_flagship_multi_stream_legend_and_lines():
+def test_plot_path_standalone_matches_scan_path_panel():
+    spec = Linspace("y", 0, 5, 3) * ~Linspace("x", 0, 10, 4)
+    scan = spec.compile()
+    fig = plot_path(scan, fig=Figure())
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) > 0
+
+
+# ---------------------------------------------------------------------------
+# Two-panel plot_scan/plot_spec (detectors present -> path + timeline)
+# ---------------------------------------------------------------------------
+
+
+def test_plot_flagship_multi_stream_two_panels_legend_and_lines():
     spec = _flagship_multi_stream_spec()
     fig = plot_spec(spec, fig=Figure(), max_trigger_markers=100000)
-    axes = fig.axes[0]
-    assert len(axes.lines) > 0
-    legend = axes.get_legend()
+    assert len(fig.axes) == 2  # path + timeline
+    path_axes, timeline_axes = fig.axes
+    assert len(path_axes.lines) > 0
+    legend = path_axes.get_legend()
     assert legend is not None
     labels = {t.get_text() for t in legend.get_texts()}
     assert labels == {"diff", "spec"}
+    # timeline: one row per stream ("diff", "spec")
+    assert {t.get_text() for t in timeline_axes.get_yticklabels()} == {"diff", "spec"}
 
 
 def test_plot_flagship_multi_stream_stays_within_physical_range():
@@ -121,39 +182,52 @@ def test_plot_flagship_multi_stream_stays_within_physical_range():
 
 def test_plot_maximal_multirate_trigger_markers_placed():
     """Parent + nested TriggerChild markers should be resolvable to real coords."""
-    spec = Acquire(
-        Product(Linspace("y", 0, 5, 3), ~Linspace("x", 0, 10, 4)),
-        fly=True,
-        detectors=[
-            DetectorGroup(1, 1, 0.003, 0.001, ["saxs", "waxs"]),
-            DetectorGroup(10, 1, 0.000299992, 8e-9, ["timestamp", "x_enc", "y_enc"]),
-        ],
-        trigger_sequence=TriggerSequence(
-            detectors=frozenset({"saxs", "waxs"}),
-            trigger_repeat=TriggerRepeat(num=4, livetime=0.003, deadtime=0.001),
-            children=[
-                TriggerChild(
-                    detectors=frozenset({"timestamp", "x_enc", "y_enc"}),
-                    repeats=[
-                        TriggerRepeat(num=10, livetime=0.000299992, deadtime=8e-9)
-                    ],
-                ),
-            ],
-        ),
-        monitors=[MonitorStream("temperature", "tc1")],
-    )
     # 3 windows (fly rows) x (4 parent + 4*10 child) = 132 markers -- well
-    # under the default cap, so they should actually be drawn as extra lines
-    # on top of the path itself.
-    fig = plot_spec(spec, fig=Figure())
-    assert len(fig.axes[0].lines) > 3  # path segments + marker scatter(s)
+    # under the default cap, so they should actually be scattered.
+    fig = plot_spec(_maximal_multirate_spec(), fig=Figure())
+    path_axes = fig.axes[0]
+    assert len(path_axes.lines) >= 3  # path segments
+    assert len(path_axes.collections) >= 1  # trigger-marker scatter(s)
 
 
 def test_plot_trigger_markers_skipped_above_cap():
     spec = _flagship_multi_stream_spec()
     fig_capped = plot_spec(spec, fig=Figure(), max_trigger_markers=0)
     fig_uncapped = plot_spec(spec, fig=Figure(), max_trigger_markers=100000)
-    assert len(fig_capped.axes[0].lines) < len(fig_uncapped.axes[0].lines)
+    assert len(fig_capped.axes[0].collections) < len(fig_uncapped.axes[0].collections)
+
+
+def test_plot_scan_without_detectors_has_no_timeline_panel():
+    scan = Linspace("x", 0, 1, 5).compile()
+    fig = plot_scan(scan, fig=Figure())
+    assert len(fig.axes) == 1
+
+
+# ---------------------------------------------------------------------------
+# plot_timeline standalone
+# ---------------------------------------------------------------------------
+
+
+def test_plot_timeline_rows_nest_children_under_parent():
+    fig = plot_timeline(_maximal_multirate_spec().compile(), fig=Figure())
+    assert len(fig.axes) == 1
+    labels = [t.get_text() for t in fig.axes[0].get_yticklabels()]
+    assert "primary" in labels
+    child_rows = [label for label in labels if label.startswith("primary └")]
+    assert len(child_rows) == 1
+    # broken_barh calls land as PolyCollections on the axes.
+    assert len(fig.axes[0].collections) >= 2  # full-period + livetime, per row
+
+
+def test_plot_timeline_empty_state_for_pure_motion_spec():
+    scan = Linspace("x", 0, 1, 5).compile()
+    fig = plot_timeline(scan, fig=Figure())
+    assert fig.axes[0].get_yticks().size == 0
+
+
+# ---------------------------------------------------------------------------
+# fig embedding (#189) and default-figure behaviour
+# ---------------------------------------------------------------------------
 
 
 def test_fig_reuse_matches_issue_189():
