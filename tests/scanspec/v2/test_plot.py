@@ -275,10 +275,18 @@ def test_dark_theme_uses_a_different_stream_palette():
     assert light_colours != dark_colours
 
 
-def test_dark_theme_3d_panes_match_axes_background():
-    """Axes3D panes are a separate colour API from the 2D facecolor/spines."""
+def test_dark_theme_3d_panes_are_dark_not_default_grey():
+    """Axes3D panes/axis lines are a separate colour API from 2D facecolor/spines.
+
+    Matplotlib's own default pane fill is a light grey that clashes badly
+    against a dark figure background if left untouched.
+    """
     spec3d = Linspace("z", 1, 3, 3) * Spiral("x", 0, 5, 2, "y", 10, 5)
     fig = plot_path(spec3d.compile(), fig=Figure(), theme="dark")
     axes = fig.axes[0]
-    pane_colour = axes.xaxis.pane.get_facecolor()  # type: ignore[reportAttributeAccessIssue]
-    assert pane_colour[:3] == axes.get_facecolor()[:3]
+    pane_luminance = np.asarray(
+        axes.xaxis.pane.get_facecolor()  # type: ignore[reportAttributeAccessIssue]
+    )[:3].sum()
+    assert pane_luminance < 1.0  # matplotlib's default light-grey pane sums to ~2.85
+    axis_line_colour = axes.xaxis.line.get_color()  # type: ignore[reportAttributeAccessIssue]
+    assert axis_line_colour != "black" and axis_line_colour != (0.0, 0.0, 0.0, 1.0)

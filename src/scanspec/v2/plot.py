@@ -80,6 +80,7 @@ class _Theme:
     grid: str
     fig_bg: str
     axes_bg: str
+    pane_bg: str  # Axes3D wall fill -- close to axes_bg but distinct, for depth
     row_band: str  # timeline alternating-row shading
     no_stream: str  # path colour when no detector stream applies
     turnaround: str  # de-emphasised connector between runs
@@ -96,6 +97,7 @@ _LIGHT = _Theme(
     grid="#e4e4ea",
     fig_bg="#ffffff",
     axes_bg="#fbfbfe",
+    pane_bg="#f0f0f6",
     row_band="#f1f1f6",
     no_stream="#3f3f4a",
     turnaround="#b7b7c2",
@@ -124,6 +126,7 @@ _DARK = _Theme(
     grid="#2c2c36",
     fig_bg="#111116",
     axes_bg="#17171e",
+    pane_bg="#212129",
     row_band="#1f1f29",
     no_stream="#c7c7d1",
     turnaround="#5a5a68",
@@ -584,9 +587,21 @@ def _apply_modern_style(fig: Figure, theme: _Theme) -> None:
 
 
 def _style_3d_axes(axes: Axes, theme: _Theme) -> None:
-    """``Axes3D`` panes/grid live in a separate API from 2D spines/grid."""
+    """``Axes3D`` panes/grid/axis-lines live in a separate API from 2D spines/grid.
+
+    A pane fill matching the axes background exactly (as an earlier version
+    of this did) removes matplotlib's default clashing grey box, but also
+    removes every depth cue -- the walls become indistinguishable from open
+    space. ``theme.pane_bg`` is close to the axes background but distinct,
+    so the box reads as a box; the pane border and the three axis lines get
+    their own themed colour too, since both otherwise default to a
+    black that's invisible against a dark background.
+    """
     for axis in (axes.xaxis, axes.yaxis, axes.zaxis):  # type: ignore[attr-defined]
-        axis.set_pane_color(theme.axes_bg)  # type: ignore
+        axis.set_pane_color(theme.pane_bg)  # type: ignore
+        axis.pane.set_edgecolor(theme.grid)  # type: ignore
+        axis.line.set_color(theme.muted_ink)  # type: ignore
+        axis.line.set_linewidth(0.8)  # type: ignore
         # No public API for the 3D grid-line colour as of matplotlib 3.10.
         axis._axinfo["grid"].update(color=theme.grid, linewidth=0.6)  # type: ignore  # noqa: SLF001
     if hasattr(axes, "zaxis"):
