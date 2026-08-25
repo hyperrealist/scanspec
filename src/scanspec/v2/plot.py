@@ -1,4 +1,4 @@
-"""`plot_scan`/`plot_spec`/`plot_path`/`plot_timeline` — visualize a scanspec.v2 scan.
+"""`plot_scan`/`plot_path`/`plot_timeline` — visualize a scanspec.v2 scan.
 
 Two complementary views, since neither alone tells the whole story:
 
@@ -12,9 +12,11 @@ Two complementary views, since neither alone tells the whole story:
   spread out spatially (e.g. a scan on a single axis that sweeps back and
   forth) — the interesting structure is in time, not space.
 
-``plot_scan``/``plot_spec`` combine both into one two-panel figure — the
-main entry points. ``plot_path``/``plot_timeline`` are the same two panels
-as standalone single-panel figures, for when only one story is wanted.
+``plot_scan`` combines both into one two-panel figure — the main entry
+point. ``plot_path``/``plot_timeline`` are the same two panels as
+standalone single-panel figures, for when only one story is wanted. All
+three accept either a compiled ``Scan`` or a bare ``Spec`` (compiled
+automatically).
 
 All four accept ``theme="light"`` (default) or ``theme="dark"`` — light for
 print/publication, dark for a dashboard/GUI context.
@@ -55,7 +57,7 @@ from .core import (
 )
 from .specs import Ellipse, Polygon, Spec
 
-__all__ = ["plot_scan", "plot_spec", "plot_path", "plot_timeline"]
+__all__ = ["plot_scan", "plot_path", "plot_timeline"]
 
 # Above this many resolved trigger instants across the whole scan, individual
 # trigger markers on the *path* view are skipped (stream colouring is kept)
@@ -375,8 +377,29 @@ def _trigger_marker_times(ts: TriggerSequence[Any]) -> list[tuple[float, Any, fl
 # ---------------------------------------------------------------------------
 
 
+def _coerce_scan(
+    scan: Scan[Any, Any, Any] | Spec[Any, Any, Any],
+    spec: Spec[Any, Any, Any] | None,
+) -> tuple[Scan[Any, Any, Any], Spec[Any, Any, Any] | None]:
+    """Auto-compile *scan* when given a bare Spec; default *spec* to it.
+
+    *spec* stays independently overridable rather than always being derived
+    from *scan* -- pause/resume needs that: ``scan.with_start(...)`` returns
+    a Scan with no spec tree of its own, but the caller may still have the
+    *original* Spec and want its region boundaries shown against the
+    resumed path. Passing both explicitly (a compiled Scan plus an
+    unrelated Spec) is technically possible but only meaningful for that
+    case -- a genuine mismatch just draws a boundary that doesn't
+    correspond to the plotted path.
+    """
+    if isinstance(scan, Spec):
+        resolved_spec = spec if spec is not None else scan
+        return scan.compile(), resolved_spec
+    return scan, spec
+
+
 def plot_scan(
-    scan: Scan[Any, Any, Any],
+    scan: Scan[Any, Any, Any] | Spec[Any, Any, Any],
     *,
     fig: Figure | None = None,
     title: str | None = None,
@@ -384,23 +407,29 @@ def plot_scan(
     max_trigger_markers: int = DEFAULT_MAX_TRIGGER_MARKERS,
     theme: ThemeName = "light",
 ) -> Figure:
-    """Plot a compiled Scan: path (top) + trigger timeline (bottom).
+    """Plot a Scan or Spec: path (top) + trigger timeline (bottom).
 
-    If *scan* has no detectors at all (no windowed/continuous streams), the
-    timeline panel is omitted and this degrades to a path-only figure.
+    *scan*: a compiled ``Scan``, or a ``Spec`` (compiled automatically --
+    and, unless *spec* is given explicitly, also used for the region
+    boundaries below). If a Scan has no detectors at all (no windowed/
+    continuous streams), the timeline panel is omitted and this degrades to
+    a path-only figure.
 
     *fig*: draw into this Figure instead of creating one (embedding, e.g. in
     a Qt widget's ``FigureCanvas`` — https://github.com/bluesky/scanspec/issues/189).
     If not given, a new Figure is created and shown (``plt.show()``) before
     returning; if given, the caller owns display.
 
-    *spec*: when given, overlays ``Ellipse``/``Polygon`` region boundaries
-    found in the spec tree onto the path panel (meaningless for a bare Scan,
-    which retains no spec tree).
+    *spec*: overlays ``Ellipse``/``Polygon`` region boundaries found in this
+    spec tree onto the path panel. Only needed explicitly when *scan* is
+    already a compiled Scan and boundaries are still wanted (e.g. a resumed
+    scan plotted against its original spec) -- passing a Spec as *scan*
+    already implies this.
 
     *theme*: ``"light"`` (default, for print/publication) or ``"dark"``
     (for a dashboard/GUI context).
     """
+    scan, spec = _coerce_scan(scan, spec)
     th = _resolve_theme(theme)
     axis_labels = _flatten_axes(scan)
     ndims = len(axis_labels)
@@ -454,31 +483,8 @@ def plot_scan(
     return fig
 
 
-def plot_spec(
-    spec: Spec[Any, Any, Any],
-    *,
-    fig: Figure | None = None,
-    title: str | None = None,
-    max_trigger_markers: int = DEFAULT_MAX_TRIGGER_MARKERS,
-    theme: ThemeName = "light",
-) -> Figure:
-    """Compile *spec* and plot it (path + timeline) with region boundaries.
-
-    See ``plot_scan``.
-    """
-    scan = spec.compile()
-    return plot_scan(
-        scan,
-        fig=fig,
-        title=title,
-        spec=spec,
-        max_trigger_markers=max_trigger_markers,
-        theme=theme,
-    )
-
-
 def plot_path(
-    scan: Scan[Any, Any, Any],
+    scan: Scan[Any, Any, Any] | Spec[Any, Any, Any],
     *,
     fig: Figure | None = None,
     title: str | None = None,
@@ -486,7 +492,8 @@ def plot_path(
     max_trigger_markers: int = DEFAULT_MAX_TRIGGER_MARKERS,
     theme: ThemeName = "light",
 ) -> Figure:
-    """Plot only the motion path — see ``plot_scan``'s path panel."""
+    """Plot only the motion path — see ``plot_scan``'s path panel and *scan*/*spec*."""
+    scan, spec = _coerce_scan(scan, spec)
     th = _resolve_theme(theme)
     axis_labels = _flatten_axes(scan)
     ndims = len(axis_labels)
@@ -522,7 +529,7 @@ def plot_path(
 
 
 def plot_timeline(
-    scan: Scan[Any, Any, Any],
+    scan: Scan[Any, Any, Any] | Spec[Any, Any, Any],
     *,
     fig: Figure | None = None,
     title: str | None = None,
@@ -530,8 +537,11 @@ def plot_timeline(
 ) -> Figure:
     """Plot only the trigger timeline (Gantt-style, one row per stream).
 
+    *scan*: a compiled ``Scan``, or a ``Spec`` (compiled automatically).
+
     See ``plot_scan``.
     """
+    scan, _ = _coerce_scan(scan, None)
     th = _resolve_theme(theme)
     detector_to_stream = _detector_stream_map(scan)
     stream_colours = _stream_colours(scan, th)

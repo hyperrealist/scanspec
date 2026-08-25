@@ -19,7 +19,7 @@ from scanspec.v2.core import (
     TriggerRepeat,
     TriggerSequence,
 )
-from scanspec.v2.plot import plot_path, plot_scan, plot_spec, plot_timeline
+from scanspec.v2.plot import plot_path, plot_scan, plot_timeline
 from scanspec.v2.specs import (
     Acquire,
     Ellipse,
@@ -77,7 +77,7 @@ def _maximal_multirate_spec() -> Acquire[str, str, str]:
 
 
 # ---------------------------------------------------------------------------
-# plot_path (no detectors -> single-panel plot_scan/plot_spec too)
+# plot_path (no detectors -> single-panel plot_scan too)
 # ---------------------------------------------------------------------------
 
 
@@ -93,23 +93,31 @@ def test_plot_scan_step_2d_returns_figure_with_lines():
 
 def test_plot_scan_fly_3d():
     spec = Linspace("z", 1, 3, 3) * Acquire(Spiral("x", 0, 5, 2, "y", 10, 5), fly=True)
-    fig = plot_spec(spec, fig=Figure())
+    fig = plot_scan(spec, fig=Figure())
     assert len(fig.axes) == 1
     assert len(fig.axes[0].lines) > 0
 
 
-def test_plot_spec_ellipse_boundary_overlay():
+def test_plot_scan_accepts_a_spec_directly():
+    """plot_scan(spec) auto-compiles rather than requiring spec.compile()."""
+    spec = Linspace("x", 0, 1, 5)
+    via_spec = plot_scan(spec, fig=Figure())
+    via_scan = plot_scan(spec.compile(), fig=Figure())
+    assert len(via_spec.axes[0].lines) == len(via_scan.axes[0].lines)
+
+
+def test_plot_scan_ellipse_boundary_overlay():
     spec = Ellipse("x", 1, 1.8, 0.2, "y", 2)
-    fig = plot_spec(spec, fig=Figure())
+    fig = plot_scan(spec, fig=Figure())
     boundary_patches = [
         p for p in fig.axes[0].patches if isinstance(p, mpl_patches.Ellipse)
     ]
     assert len(boundary_patches) >= 1
 
 
-def test_plot_spec_polygon_boundary_overlay():
+def test_plot_scan_polygon_boundary_overlay():
     spec = Polygon("x", "y", [(0, 0), (1, 0), (1, 1), (0, 1)], 0.1)
-    fig = plot_spec(spec, fig=Figure())
+    fig = plot_scan(spec, fig=Figure())
     boundary_patches = [
         p for p in fig.axes[0].patches if isinstance(p, mpl_patches.Polygon)
     ]
@@ -117,7 +125,7 @@ def test_plot_spec_polygon_boundary_overlay():
 
 
 def test_plot_scan_has_no_boundary_overlay_without_spec():
-    """plot_scan (no spec passed) can't walk a spec tree for regions.
+    """A bare Scan (no spec= given) can't walk a spec tree for regions.
 
     Turnaround arrows are also Patches now (FancyArrowPatch), so check
     specifically for boundary-shape patches rather than patch count.
@@ -133,6 +141,22 @@ def test_plot_scan_has_no_boundary_overlay_without_spec():
     assert len(boundary_patches) == 0
 
 
+def test_plot_scan_spec_kwarg_overrides_for_an_already_compiled_scan():
+    """The pause/resume case: a Scan with no spec tree of its own, plotted
+
+    against a *different* object's original Spec (spec= given explicitly
+    alongside an already-compiled Scan, not derived from it) -- boundaries
+    should still be drawn.
+    """
+    spec = Ellipse("x", 1, 1.8, 0.2, "y", 2)
+    scan = spec.compile()  # stands in for e.g. scan.with_start(...)
+    fig = plot_path(scan, spec=spec, fig=Figure())
+    boundary_patches = [
+        p for p in fig.axes[0].patches if isinstance(p, mpl_patches.Ellipse)
+    ]
+    assert len(boundary_patches) >= 1
+
+
 def test_plot_path_standalone_matches_scan_path_panel():
     spec = Linspace("y", 0, 5, 3) * ~Linspace("x", 0, 10, 4)
     scan = spec.compile()
@@ -142,13 +166,13 @@ def test_plot_path_standalone_matches_scan_path_panel():
 
 
 # ---------------------------------------------------------------------------
-# Two-panel plot_scan/plot_spec (detectors present -> path + timeline)
+# Two-panel plot_scan (detectors present -> path + timeline)
 # ---------------------------------------------------------------------------
 
 
 def test_plot_flagship_multi_stream_two_panels_legend_and_lines():
     spec = _flagship_multi_stream_spec()
-    fig = plot_spec(spec, fig=Figure(), max_trigger_markers=100000)
+    fig = plot_scan(spec, fig=Figure(), max_trigger_markers=100000)
     assert len(fig.axes) == 2  # path + timeline
     path_axes, timeline_axes = fig.axes
     assert len(path_axes.lines) > 0
@@ -170,7 +194,7 @@ def test_plot_flagship_multi_stream_stays_within_physical_range():
     and the fitted curve overshoots far outside the real [7.0, 7.1] range.
     """
     spec = _flagship_multi_stream_spec()
-    fig = plot_spec(spec, fig=Figure(), max_trigger_markers=0)
+    fig = plot_scan(spec, fig=Figure(), max_trigger_markers=0)
     xdata = [np.asarray(line.get_xdata()) for line in fig.axes[0].lines]
     all_x = np.concatenate([x for x in xdata if x.size])
     # True range (with fence/post half-step boundaries) is
@@ -184,7 +208,7 @@ def test_plot_maximal_multirate_trigger_markers_placed():
     """Parent + nested TriggerChild markers should be resolvable to real coords."""
     # 3 windows (fly rows) x (4 parent + 4*10 child) = 132 markers -- well
     # under the default cap, so they should actually be scattered.
-    fig = plot_spec(_maximal_multirate_spec(), fig=Figure())
+    fig = plot_scan(_maximal_multirate_spec(), fig=Figure())
     path_axes = fig.axes[0]
     assert len(path_axes.lines) >= 3  # path segments
     assert len(path_axes.collections) >= 1  # trigger-marker scatter(s)
@@ -192,8 +216,8 @@ def test_plot_maximal_multirate_trigger_markers_placed():
 
 def test_plot_trigger_markers_skipped_above_cap():
     spec = _flagship_multi_stream_spec()
-    fig_capped = plot_spec(spec, fig=Figure(), max_trigger_markers=0)
-    fig_uncapped = plot_spec(spec, fig=Figure(), max_trigger_markers=100000)
+    fig_capped = plot_scan(spec, fig=Figure(), max_trigger_markers=0)
+    fig_uncapped = plot_scan(spec, fig=Figure(), max_trigger_markers=100000)
     assert len(fig_capped.axes[0].collections) < len(fig_uncapped.axes[0].collections)
 
 
@@ -231,17 +255,17 @@ def test_plot_timeline_empty_state_for_pure_motion_spec():
 
 
 def test_fig_reuse_matches_issue_189():
-    """plot_spec(..., fig=existing_figure) adds axes to that figure (#189)."""
+    """plot_scan(..., fig=existing_figure) adds axes to that figure (#189)."""
     fig = Figure()
-    plot_spec(Linspace("x", 0, 1, 5), fig=fig)
+    plot_scan(Linspace("x", 0, 1, 5), fig=fig)
     assert len(fig.axes) == 1
-    plot_spec(Linspace("y", 0, 1, 3), fig=fig)
+    plot_scan(Linspace("y", 0, 1, 3), fig=fig)
     assert len(fig.axes) == 2
 
 
-def test_plot_spec_without_fig_creates_and_shows_one():
+def test_plot_scan_without_fig_creates_and_shows_one():
     with patch("scanspec.v2.plot.plt.show") as mock_show:
-        fig = plot_spec(Linspace("x", 0, 1, 5))
+        fig = plot_scan(Linspace("x", 0, 1, 5))
     assert isinstance(fig, Figure)
     assert len(fig.axes) == 1
     mock_show.assert_called_once()
@@ -253,8 +277,8 @@ def test_plot_spec_without_fig_creates_and_shows_one():
 
 
 def test_dark_theme_uses_a_dark_figure_background():
-    light = plot_spec(Linspace("x", 0, 1, 5), fig=Figure(), theme="light")
-    dark = plot_spec(Linspace("x", 0, 1, 5), fig=Figure(), theme="dark")
+    light = plot_scan(Linspace("x", 0, 1, 5), fig=Figure(), theme="light")
+    dark = plot_scan(Linspace("x", 0, 1, 5), fig=Figure(), theme="dark")
     # Luminance check rather than an exact colour match: light theme's
     # background should be much brighter than dark theme's.
     light_luminance = np.asarray(light.get_facecolor())[:3].sum()
@@ -264,8 +288,8 @@ def test_dark_theme_uses_a_dark_figure_background():
 
 def test_dark_theme_uses_a_different_stream_palette():
     spec = _flagship_multi_stream_spec()
-    light = plot_spec(spec, fig=Figure(), theme="light", max_trigger_markers=0)
-    dark = plot_spec(spec, fig=Figure(), theme="dark", max_trigger_markers=0)
+    light = plot_scan(spec, fig=Figure(), theme="light", max_trigger_markers=0)
+    dark = plot_scan(spec, fig=Figure(), theme="dark", max_trigger_markers=0)
     light_legend = light.axes[0].get_legend()
     dark_legend = dark.axes[0].get_legend()
     assert light_legend is not None
