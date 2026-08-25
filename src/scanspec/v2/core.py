@@ -463,6 +463,78 @@ class MonitorStream(Generic[MonitorT]):
     detector: MonitorT
 
 
+def flatten_axes(scan: Scan[Any, Any, Any]) -> list[Any]:
+    """Outer -> inner axis order, matching 1.x's ``spec.axes()``.
+
+    ``Concat``/``Repeat`` generators carry no axes of their own (``axes=[]``)
+    -- the real axes live on the leaf generators nested inside their
+    ``ConcatSource``, so those have to be walked too. Shared by ``plot.py``
+    and ``service.py``.
+    """
+    axes: list[Any] = []
+
+    def _collect(gen: WindowGenerator[Any]) -> None:
+        for ax in gen.axes:
+            if ax not in axes:
+                axes.append(ax)
+        if isinstance(gen.source, ConcatSource):
+            for child in gen.source.children:
+                _collect(child)
+
+    for gen in scan.generators:
+        _collect(gen)
+    return axes
+
+
+def _generator_window_count(gen: WindowGenerator[Any]) -> int:
+    """Number of windows *gen* itself yields (see ``Scan.number_of_events``)."""
+    if gen.fly:
+        return 1
+    if isinstance(gen.source, ConcatSource):
+        return sum(_generator_window_count(child) for child in gen.source.children)
+    return gen.length
+
+
+def is_turnaround(
+    previous: dict[Any, float],
+    next_start: dict[Any, float],
+    axes: Sequence[Any],
+) -> bool:
+    """True if any *axes* jumps between the end of one window and the start of the next.
+
+    ``previous``/``next_start`` are per-axis positions (a window's last
+    point and the following window's first point respectively, with every
+    axis in *axes* already resolved -- callers fill in unchanged axes from
+    the running last-known position before calling this, since a Window's
+    own ``static_axes``/``moving_axes`` only records *changed* axes).
+    Shared by ``plot.py`` (turnaround rendering) and ``service.py`` (the
+    ``/gap`` endpoint); lives here, not in either of those, so neither
+    module needs the other's optional dependencies.
+    """
+    return any(
+        ax in previous
+        and ax in next_start
+        and not isclose(previous[ax], next_start[ax], rel_tol=1e-9, abs_tol=1e-9)
+        for ax in axes
+    )
+
+
+def detector_stream_map(
+    scan: Scan[Any, DetectorT, Any],
+) -> dict[DetectorT, str]:
+    """Map each detector to the name of the stream that triggers it."""
+    mapping: dict[DetectorT, str] = {}
+    for stream in scan.windowed_streams:
+        for dg in stream.detector_groups:
+            for d in dg.detectors:
+                mapping[d] = stream.name
+    for cstream in scan.continuous_streams:
+        for dg in cstream.detector_groups:
+            for d in dg.detectors:
+                mapping[d] = cstream.name
+    return mapping
+
+
 def _iter_with_outer(
     gens: list[WindowGenerator[AxisT]],
     depth: int,
@@ -623,6 +695,27 @@ def trigger_sequences_duration(seqs: list[TriggerSequence[DetectorT]]) -> float:
     return total
 
 
+def repeat_times(
+    repeats: list[TriggerRepeat], t0: float
+) -> tuple[list[tuple[float, float]], float]:
+    """Centred-livetime (time, livetime) trigger midpoints for a repeats list.
+
+    Returns (times from t0, end time) so callers can chain/nest. Shared by
+    ``plot.py`` (trigger-marker placement) and ``service.py`` (the
+    ``/triggers`` endpoint).
+    """
+    times: list[tuple[float, float]] = []
+    t = t0
+    for r in repeats:
+        if r.livetime is None or r.deadtime is None:
+            continue
+        period = r.livetime + r.deadtime
+        for k in range(r.num):
+            times.append((t + k * period + period / 2, r.livetime))
+        t += r.num * period
+    return times, t
+
+
 class Scan(Generic[AxisT, DetectorT, MonitorT]):
     """Compiled output of Spec.compile().
 
@@ -683,6 +776,21 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
     def non_linear(self) -> bool:
         """True if any fly generator uses a non-linear position function."""
         return any(g.fly and g.non_linear for g in self.generators)
+
+    @property
+    def number_of_events(self) -> int:
+        """Total number of windows this Scan will yield, without iterating.
+
+        O(generator-tree size): outer -> inner generators combine as a
+        nested product (each deeper generator runs once per outer
+        position, see ``_iter_with_outer``); a ``ConcatSource`` generator's
+        own count is the *sum* of its children's counts, since concat is
+        sequential rather than a product dimension.
+        """
+        total = 1
+        for gen in self.generators:
+            total *= _generator_window_count(gen)
+        return total
 
     @staticmethod
     def _changed_axes(

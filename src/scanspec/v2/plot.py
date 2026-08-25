@@ -36,7 +36,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import cycle
-from math import isclose
 from typing import Any, Literal
 
 import numpy as np
@@ -48,14 +47,15 @@ from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d import proj3d  # type: ignore
 
 from .core import (
-    ConcatSource,
     Scan,
-    TriggerRepeat,
     TriggerSequence,
     Window,
-    WindowGenerator,
+    detector_stream_map,
+    flatten_axes,
+    is_turnaround,
+    repeat_times,
 )
-from .specs import Ellipse, Polygon, Spec
+from .specs import Ellipse, Polygon, Spec, coerce_scan
 
 __all__ = ["plot_scan", "plot_path", "plot_timeline"]
 
@@ -243,41 +243,6 @@ def _hex_to_rgb(colour: str) -> tuple[float, float, float]:
 # ---------------------------------------------------------------------------
 
 
-def _flatten_axes(scan: Scan[Any, Any, Any]) -> list[Any]:
-    """Outer -> inner axis order, matching 1.x's ``spec.axes()``.
-
-    ``Concat``/``Repeat`` generators carry no axes of their own (``axes=[]``)
-    — the real axes live on the leaf generators nested inside their
-    ``ConcatSource``, so those have to be walked too.
-    """
-    axes: list[Any] = []
-
-    def _collect(gen: WindowGenerator[Any]) -> None:
-        for ax in gen.axes:
-            if ax not in axes:
-                axes.append(ax)
-        if isinstance(gen.source, ConcatSource):
-            for child in gen.source.children:
-                _collect(child)
-
-    for gen in scan.generators:
-        _collect(gen)
-    return axes
-
-
-def _detector_stream_map(scan: Scan[Any, Any, Any]) -> dict[Any, str]:
-    mapping: dict[Any, str] = {}
-    for stream in scan.windowed_streams:
-        for dg in stream.detector_groups:
-            for d in dg.detectors:
-                mapping[d] = stream.name
-    for cstream in scan.continuous_streams:
-        for dg in cstream.detector_groups:
-            for d in dg.detectors:
-                mapping[d] = cstream.name
-    return mapping
-
-
 def _stream_colours(scan: Scan[Any, Any, Any], theme: _Theme) -> dict[str, str]:
     names: list[str] = [s.name for s in scan.windowed_streams] + [
         s.name for s in scan.continuous_streams
@@ -328,25 +293,6 @@ def _marker_size(livetime: float) -> float:
     return float(np.clip(lo + 26 * livetime**0.25, lo, hi))
 
 
-def _repeat_times(
-    repeats: list[TriggerRepeat], t0: float
-) -> tuple[list[tuple[float, float]], float]:
-    """Centred-livetime (time, livetime) trigger midpoints for a repeats list.
-
-    Returns (times from t0, end time) so callers can chain/nest.
-    """
-    times: list[tuple[float, float]] = []
-    t = t0
-    for r in repeats:
-        if r.livetime is None or r.deadtime is None:
-            continue
-        period = r.livetime + r.deadtime
-        for k in range(r.num):
-            times.append((t + k * period + period / 2, r.livetime))
-        t += r.num * period
-    return times, t
-
-
 def _trigger_marker_times(ts: TriggerSequence[Any]) -> list[tuple[float, Any, float]]:
     """(time, representative_detector, livetime) triples.
 
@@ -357,7 +303,7 @@ def _trigger_marker_times(ts: TriggerSequence[Any]) -> list[tuple[float, Any, fl
     livetime placement recursively.
     """
     result: list[tuple[float, Any, float]] = []
-    parent_times, _ = _repeat_times([ts.trigger_repeat], 0.0)
+    parent_times, _ = repeat_times([ts.trigger_repeat], 0.0)
     parent_detector = next(iter(ts.detectors), None)
     result += [(t, parent_detector, lt) for t, lt in parent_times]
 
@@ -367,7 +313,7 @@ def _trigger_marker_times(ts: TriggerSequence[Any]) -> list[tuple[float, Any, fl
     for child in ts.children:
         child_detector = next(iter(child.detectors), None)
         for p in range(ts.trigger_repeat.num):
-            child_times, _ = _repeat_times(child.repeats, p * parent_period)
+            child_times, _ = repeat_times(child.repeats, p * parent_period)
             result += [(t, child_detector, lt) for t, lt in child_times]
     return result
 
@@ -375,27 +321,6 @@ def _trigger_marker_times(ts: TriggerSequence[Any]) -> list[tuple[float, Any, fl
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-
-def _coerce_scan(
-    scan: Scan[Any, Any, Any] | Spec[Any, Any, Any],
-    spec: Spec[Any, Any, Any] | None,
-) -> tuple[Scan[Any, Any, Any], Spec[Any, Any, Any] | None]:
-    """Auto-compile *scan* when given a bare Spec; default *spec* to it.
-
-    *spec* stays independently overridable rather than always being derived
-    from *scan* -- pause/resume needs that: ``scan.with_start(...)`` returns
-    a Scan with no spec tree of its own, but the caller may still have the
-    *original* Spec and want its region boundaries shown against the
-    resumed path. Passing both explicitly (a compiled Scan plus an
-    unrelated Spec) is technically possible but only meaningful for that
-    case -- a genuine mismatch just draws a boundary that doesn't
-    correspond to the plotted path.
-    """
-    if isinstance(scan, Spec):
-        resolved_spec = spec if spec is not None else scan
-        return scan.compile(), resolved_spec
-    return scan, spec
 
 
 def plot_scan(
@@ -429,11 +354,11 @@ def plot_scan(
     *theme*: ``"light"`` (default, for print/publication) or ``"dark"``
     (for a dashboard/GUI context).
     """
-    scan, spec = _coerce_scan(scan, spec)
+    scan, spec = coerce_scan(scan, spec)
     th = _resolve_theme(theme)
-    axis_labels = _flatten_axes(scan)
+    axis_labels = flatten_axes(scan)
     ndims = len(axis_labels)
-    detector_to_stream = _detector_stream_map(scan)
+    detector_to_stream = detector_stream_map(scan)
     stream_colours = _stream_colours(scan, th)
     has_timeline = bool(scan.windowed_streams or scan.continuous_streams)
 
@@ -499,11 +424,11 @@ def plot_path(
     theme: ThemeName = "light",
 ) -> Figure:
     """Plot only the motion path — see ``plot_scan``'s path panel and *scan*/*spec*."""
-    scan, spec = _coerce_scan(scan, spec)
+    scan, spec = coerce_scan(scan, spec)
     th = _resolve_theme(theme)
-    axis_labels = _flatten_axes(scan)
+    axis_labels = flatten_axes(scan)
     ndims = len(axis_labels)
-    detector_to_stream = _detector_stream_map(scan)
+    detector_to_stream = detector_stream_map(scan)
     stream_colours = _stream_colours(scan, th)
 
     owns_figure = fig is None
@@ -547,9 +472,9 @@ def plot_timeline(
 
     See ``plot_scan``.
     """
-    scan, _ = _coerce_scan(scan, None)
+    scan, _ = coerce_scan(scan, None)
     th = _resolve_theme(theme)
-    detector_to_stream = _detector_stream_map(scan)
+    detector_to_stream = detector_stream_map(scan)
     stream_colours = _stream_colours(scan, th)
 
     owns_figure = fig is None
@@ -756,13 +681,7 @@ def _draw_path_and_streams(
         )
 
         if not first_window:
-            gap = any(
-                ax in last
-                and ax in start_pos
-                and not isclose(last[ax], start_pos[ax], rel_tol=1e-9, abs_tol=1e-9)
-                for ax in axis_labels
-            )
-            if gap:
+            if is_turnaround(last, start_pos, axis_labels):
                 _draw_turnaround(axes, axis_labels, last, start_pos, theme)
             else:
                 _draw_segment(axes, axis_labels, [last, start_pos], colour, theme)

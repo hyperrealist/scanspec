@@ -20,6 +20,7 @@ from scanspec.v2.core import (
     WindowGenerator,
     _truncate_trigger_sequence,  # type: ignore[reportPrivateUsage]
 )
+from scanspec.v2.specs import Acquire, Linspace
 
 
 def test_trigger_repeat():
@@ -437,3 +438,24 @@ def test_scan_fly():
         monitors=[],
     )
     assert scan.generators[0].fly is True
+
+
+def test_number_of_events_product():
+    spec = Linspace("x", 0, 1, 3) * Linspace("y", 0, 1, 4)
+    assert spec.compile().number_of_events == 12
+
+
+def test_number_of_events_concat_sums_not_products():
+    spec = Linspace("x", 0, 1, 3).concat(Linspace("x", 0, 1, 4))
+    assert spec.compile().number_of_events == 7
+
+
+def test_number_of_events_fly_generator_counts_as_one():
+    spec: Acquire[str, Never, Never] = Acquire(Linspace("x", 0, 1, 5), fly=True)
+    assert spec.compile().number_of_events == 1
+
+
+def test_number_of_events_mixed_fly_and_step():
+    fly: Acquire[str, Never, Never] = Acquire(Linspace("x", 0, 1, 5), fly=True)
+    spec = Linspace("y", 0, 1, 3) * fly
+    assert spec.compile().number_of_events == 3

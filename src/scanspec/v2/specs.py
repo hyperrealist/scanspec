@@ -232,6 +232,30 @@ class Spec(BaseModel, Generic[AxisT, DetectorT, MonitorT], metaclass=PosargsMeta
         raise NotImplementedError
 
 
+def coerce_scan(
+    scan: Scan[Any, Any, Any] | Spec[Any, Any, Any],
+    spec: Spec[Any, Any, Any] | None,
+) -> tuple[Scan[Any, Any, Any], Spec[Any, Any, Any] | None]:
+    """Auto-compile *scan* when given a bare Spec; default *spec* to it.
+
+    *spec* stays independently overridable rather than always being derived
+    from *scan* -- pause/resume needs that: ``scan.with_start(...)`` returns
+    a Scan with no spec tree of its own, but the caller may still have the
+    *original* Spec and want its region boundaries shown against the
+    resumed path. Passing both explicitly (a compiled Scan plus an
+    unrelated Spec) is technically possible but only meaningful for that
+    case -- a genuine mismatch just draws a boundary that doesn't
+    correspond to the plotted path.
+
+    Lives here (not in ``plot.py`` or ``service.py``) so both can accept
+    ``Scan | Spec`` without depending on each other's optional extras.
+    """
+    if isinstance(scan, Spec):
+        resolved_spec = spec if spec is not None else scan
+        return scan.compile(), resolved_spec
+    return scan, spec
+
+
 # ---------------------------------------------------------------------------
 # AnySpec — single discriminated union covering all subclasses.
 #
