@@ -62,29 +62,33 @@ __all__ = ["plot_scan", "plot_spec", "plot_path", "plot_timeline"]
 DEFAULT_MAX_TRIGGER_MARKERS = 2000
 
 _FLY_SAMPLE_POINTS = 20  # samples along a non_linear fly window's true curve
-_MARKER_SIZE_RANGE = (3.0, 11.0)  # trigger-marker point size range, by livetime
+_MARKER_SIZE_RANGE = (5.0, 15.0)  # trigger-marker point size range, by livetime
 
-# A curated qualitative palette (muted, print-friendly) used for streams,
-# in preference to matplotlib's default colour cycle.
+# A vivid qualitative palette used for streams, in preference to
+# matplotlib's default colour cycle -- picked for strong contrast against a
+# light background rather than print-muted tones.
 _PALETTE = [
-    "#4C72B0",  # blue
-    "#DD8452",  # orange
-    "#55A868",  # green
-    "#C44E52",  # red
-    "#8172B2",  # purple
-    "#937860",  # brown
-    "#DA8BC3",  # pink
-    "#8C8C8C",  # grey
-    "#CCB974",  # olive
-    "#64B5CD",  # cyan
+    "#3B82F6",  # blue
+    "#F97316",  # orange
+    "#10B981",  # emerald
+    "#EF4444",  # red
+    "#8B5CF6",  # violet
+    "#EC4899",  # pink
+    "#14B8A6",  # teal
+    "#F59E0B",  # amber
+    "#6366F1",  # indigo
+    "#84CC16",  # lime
 ]
 
-_INK = "#2b2b33"  # primary text/spine colour
-_MUTED_INK = "#6b6b76"  # secondary text colour
+_INK = "#1f1f27"  # primary text/spine colour
+_MUTED_INK = "#63636f"  # secondary text colour
 _GRID = "#e4e4ea"
 _FIG_BG = "#ffffff"
 _AXES_BG = "#fbfbfe"
 _ROW_BAND = "#f1f1f6"
+_NO_STREAM_COLOUR = "#3f3f4a"  # path colour when no detector stream applies
+_TURNAROUND_COLOUR = "#b7b7c2"  # de-emphasised connector between runs
+_BOUNDARY_COLOUR = "#8B5CF6"  # Ellipse/Polygon region-boundary overlay
 
 
 # ---------------------------------------------------------------------------
@@ -124,19 +128,35 @@ class Arrow3D(patches.FancyArrowPatch):
 
 def _add_3d_turnaround_arrow(axes: Axes, arrays: list[npt.NDArray[np.float64]]) -> None:
     arrows = [a[-2:] for a in reversed(arrays)]
-    a = Arrow3D(*arrows[:3], mutation_scale=10, arrowstyle="-|>", color="lightgrey")
+    a = Arrow3D(
+        *arrows[:3], mutation_scale=10, arrowstyle="-|>", color=_TURNAROUND_COLOUR
+    )
     axes.add_artist(a)
 
 
 def _get_boundaries(spec: Spec[Any, Any, Any]) -> Iterator[patches.Patch]:
+    """Region-boundary overlays: a soft fill wash plus a solid coloured edge.
+
+    An outline alone (1.x's ``fill=False``) reads as just a black circle
+    when the enclosed path has no detector stream of its own to colour it
+    (e.g. a bare ``Ellipse``/``Polygon`` with no ``Acquire`` wrapping it) --
+    the fill gives the region presence even then.
+    """
+    patch_kwargs: dict[str, Any] = {
+        "fill": True,
+        "facecolor": _BOUNDARY_COLOUR,
+        "alpha": 0.1,
+        "edgecolor": _BOUNDARY_COLOUR,
+        "linewidth": 1.8,
+    }
     if isinstance(spec, Ellipse):
         xy = spec.x_centre, spec.y_centre
         y_diam = (
             spec.y_diameter if spec.y_diameter is not None else abs(spec.x_diameter)
         )
-        yield patches.Ellipse(xy, spec.x_diameter, y_diam, fill=False)
+        yield patches.Ellipse(xy, spec.x_diameter, y_diam, **patch_kwargs)
     elif isinstance(spec, Polygon):
-        yield patches.Polygon(spec.vertices, fill=False)
+        yield patches.Polygon(spec.vertices, **patch_kwargs)
     else:
         for name in type(spec).model_fields:
             s = getattr(spec, name)
@@ -220,7 +240,7 @@ def _window_colour(streams: frozenset[str], stream_colours: dict[str, str]) -> s
     limitation of the data available.
     """
     if not streams:
-        return "lightgrey"
+        return _NO_STREAM_COLOUR
     return stream_colours[sorted(streams)[0]]
 
 
@@ -652,12 +672,22 @@ def _draw_segment(
         arrays = [np.array([points[0].get(ax, 0.0)]) for ax in axis_labels] or [
             np.zeros(1)
         ]
-        _plot_arrays(axes, arrays, marker=".", color=colour)
+        _plot_arrays(
+            axes,
+            arrays,
+            marker="o",
+            markersize=6,
+            color=colour,
+            markeredgecolor="white",
+            markeredgewidth=0.6,
+        )
         return
     arrays = [np.array([p.get(ax, 0.0) for p in points]) for ax in axis_labels] or [
         np.zeros(len(points))
     ]
-    _plot_arrays(axes, arrays, color=colour, linewidth=1.6, alpha=0.85)
+    _plot_arrays(
+        axes, arrays, color=colour, linewidth=2.4, alpha=0.95, solid_capstyle="round"
+    )
 
 
 def _draw_turnaround(
@@ -689,7 +719,7 @@ def _draw_turnaround(
             connectionstyle="arc3,rad=0.25",
             arrowstyle="-|>",
             mutation_scale=10,
-            color="lightgrey",
+            color=_TURNAROUND_COLOUR,
             linestyle="--",
             linewidth=1.2,
         )
@@ -704,7 +734,7 @@ def _draw_turnaround(
         )
         for ax in axis_labels
     ]
-    _plot_arrays(axes, arrays, color="lightgrey", linestyle="--")
+    _plot_arrays(axes, arrays, color=_TURNAROUND_COLOUR, linestyle="--")
     _add_3d_turnaround_arrow(axes, arrays)
 
 
@@ -720,11 +750,14 @@ def _draw_trigger_markers(
     ] or [np.zeros(len(trigger_markers))]
     face_colours = [m[1] for m in trigger_markers]
     sizes = np.array([_marker_size(m[2]) for m in trigger_markers]) ** 2
+    # A thin white edge lifts markers off the path line/grid behind them
+    # instead of blending into it -- a cheap "halo" for visual pop.
     kwargs: dict[str, Any] = {
         "c": face_colours,
         "s": sizes,
-        "alpha": 0.75,
-        "edgecolors": "none",
+        "alpha": 0.9,
+        "edgecolors": "white",
+        "linewidths": 0.6,
     }
     if len(per_axis) > 2:
         axes.scatter3D(per_axis[2], per_axis[1], per_axis[0], **kwargs)  # type: ignore
@@ -738,7 +771,15 @@ def _draw_stream_legend(axes: Axes, stream_colours: dict[str, str]) -> None:
     if not stream_colours:
         return
     handles = [
-        plt.Line2D([0], [0], color=colour, marker="o", label=name)  # type: ignore
+        plt.Line2D(  # type: ignore
+            [0],
+            [0],
+            color=colour,
+            marker="o",
+            markersize=7,
+            linewidth=2.4,
+            label=name,
+        )
         for name, colour in stream_colours.items()
     ]
     axes.legend(handles=handles, loc="best", fontsize="small")  # type: ignore
