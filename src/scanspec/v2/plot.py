@@ -439,9 +439,15 @@ def plot_scan(
 
     owns_figure = fig is None
     if fig is None:
-        fig = plt.figure(  # type: ignore
-            figsize=(7, 8) if has_timeline else (7, 6), layout="constrained"
-        )
+        if has_timeline:
+            figsize = (7, 8)
+        elif ndims >= 2:
+            figsize = (7, 6)
+        else:
+            # A 1D (or 0D) path has no vertical spread at all -- a short,
+            # wide aspect suits it far better than a near-square one.
+            figsize = (7, 3)
+        fig = plt.figure(figsize=figsize, layout="constrained")  # type: ignore
 
     if has_timeline:
         # hspace only when there's no layout engine to manage spacing itself
@@ -503,7 +509,7 @@ def plot_path(
     owns_figure = fig is None
     if fig is None:
         fig = plt.figure(  # type: ignore
-            figsize=(6, 6) if ndims else (6, 2), layout="constrained"
+            figsize=(6, 6) if ndims >= 2 else (6, 2), layout="constrained"
         )
     axes = _make_path_axes(fig, ndims)
     _style_path_axes(axes, ndims, axis_labels)
@@ -699,6 +705,23 @@ def _draw_path(
     if len(trigger_markers) <= max_trigger_markers:
         _draw_trigger_markers(axes, trigger_markers, theme)
     _draw_stream_legend(axes, stream_colours)
+    if len(axis_labels) <= 1:
+        _centre_flat_ylim(axes)
+
+
+def _centre_flat_ylim(axes: Axes) -> None:
+    """Centre y=0 vertically for a 1D (or 0D) path.
+
+    All of its content -- points, turnaround arcs -- sits on a single
+    y=0 baseline (the axis itself is hidden), but matplotlib's autoscale
+    is still data-driven and asymmetric: a curved ``arc3`` turnaround
+    connector bulges to one side only, never the other, so the default
+    range is lopsided and the flat path renders hugging one edge of the
+    figure instead of sitting in the middle of it.
+    """
+    lo, hi = axes.get_ylim()
+    half = max(abs(lo), abs(hi), 1e-6)
+    axes.set_ylim(-half, half)
 
 
 def _draw_path_and_streams(

@@ -91,6 +91,18 @@ def test_plot_scan_step_2d_returns_figure_with_lines():
     assert fig.axes[0].get_ylabel() == "y"
 
 
+def test_plot_1d_path_is_vertically_centred():
+    """Regression: a 1D path's y=0 baseline must sit centred, not hugging
+
+    one edge. Turnaround arcs (arc3 connectors) bulge to one side only, so
+    matplotlib's data-driven autoscale is asymmetric by default even
+    though the hidden y-axis has nothing but a flat y=0 baseline to show.
+    """
+    fig = plot_path(Linspace("x", 0, 1, 5), fig=Figure())
+    lo, hi = fig.axes[0].get_ylim()
+    assert lo == -hi
+
+
 def test_plot_scan_fly_3d():
     spec = Linspace("z", 1, 3, 3) * Acquire(Spiral("x", 0, 5, 2, "y", 10, 5), fly=True)
     fig = plot_scan(spec, fig=Figure())
