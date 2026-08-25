@@ -16,6 +16,9 @@ Two complementary views, since neither alone tells the whole story:
 main entry points. ``plot_path``/``plot_timeline`` are the same two panels
 as standalone single-panel figures, for when only one story is wanted.
 
+All four accept ``theme="light"`` (default) or ``theme="dark"`` — light for
+print/publication, dark for a dashboard/GUI context.
+
 Built directly on ``Window``/``Scan`` rather than ported from 1.x's
 plot.py: no precomputed position arrays exist in v2 (see ``Scan``'s
 docstring), and the path is drawn window-by-window with plain line
@@ -29,9 +32,10 @@ rather than raising.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from itertools import cycle
 from math import isclose
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -61,34 +65,87 @@ __all__ = ["plot_scan", "plot_spec", "plot_path", "plot_timeline"]
 # as a single collection, unlike per-point markers.
 DEFAULT_MAX_TRIGGER_MARKERS = 2000
 
+ThemeName = Literal["light", "dark"]
+
 _FLY_SAMPLE_POINTS = 20  # samples along a non_linear fly window's true curve
 _MARKER_SIZE_RANGE = (5.0, 15.0)  # trigger-marker point size range, by livetime
 
-# A vivid qualitative palette used for streams, in preference to
-# matplotlib's default colour cycle -- picked for strong contrast against a
-# light background rather than print-muted tones.
-_PALETTE = [
-    "#3B82F6",  # blue
-    "#F97316",  # orange
-    "#10B981",  # emerald
-    "#EF4444",  # red
-    "#8B5CF6",  # violet
-    "#EC4899",  # pink
-    "#14B8A6",  # teal
-    "#F59E0B",  # amber
-    "#6366F1",  # indigo
-    "#84CC16",  # lime
-]
 
-_INK = "#1f1f27"  # primary text/spine colour
-_MUTED_INK = "#63636f"  # secondary text colour
-_GRID = "#e4e4ea"
-_FIG_BG = "#ffffff"
-_AXES_BG = "#fbfbfe"
-_ROW_BAND = "#f1f1f6"
-_NO_STREAM_COLOUR = "#3f3f4a"  # path colour when no detector stream applies
-_TURNAROUND_COLOUR = "#b7b7c2"  # de-emphasised connector between runs
-_BOUNDARY_COLOUR = "#8B5CF6"  # Ellipse/Polygon region-boundary overlay
+@dataclass(frozen=True)
+class _Theme:
+    """Every colour used by this module -- see ``_LIGHT``/``_DARK`` below."""
+
+    ink: str  # primary text/spine colour
+    muted_ink: str  # secondary text colour (axis labels, ticks)
+    grid: str
+    fig_bg: str
+    axes_bg: str
+    row_band: str  # timeline alternating-row shading
+    no_stream: str  # path colour when no detector stream applies
+    turnaround: str  # de-emphasised connector between runs
+    boundary: str  # Ellipse/Polygon region-boundary overlay
+    empty_state: str  # "no detector triggering" placeholder text
+    palette: tuple[str, ...]  # stream colour cycle
+
+
+# Vivid on white -- picked for strong contrast against a light background
+# rather than print-muted tones.
+_LIGHT = _Theme(
+    ink="#1f1f27",
+    muted_ink="#63636f",
+    grid="#e4e4ea",
+    fig_bg="#ffffff",
+    axes_bg="#fbfbfe",
+    row_band="#f1f1f6",
+    no_stream="#3f3f4a",
+    turnaround="#b7b7c2",
+    boundary="#8B5CF6",
+    empty_state="#9a9aa5",
+    palette=(
+        "#3B82F6",  # blue
+        "#F97316",  # orange
+        "#10B981",  # emerald
+        "#EF4444",  # red
+        "#8B5CF6",  # violet
+        "#EC4899",  # pink
+        "#14B8A6",  # teal
+        "#F59E0B",  # amber
+        "#6366F1",  # indigo
+        "#84CC16",  # lime
+    ),
+)
+
+# Lighter/brighter hues than _LIGHT's -- fully-saturated 500-shade colours
+# read as muddy on a near-black background, so this uses the lighter end of
+# the same hue families instead of just reusing _LIGHT's palette verbatim.
+_DARK = _Theme(
+    ink="#f0f0f5",
+    muted_ink="#9a9aa8",
+    grid="#2c2c36",
+    fig_bg="#111116",
+    axes_bg="#17171e",
+    row_band="#1f1f29",
+    no_stream="#c7c7d1",
+    turnaround="#5a5a68",
+    boundary="#c4b5fd",
+    empty_state="#6b6b78",
+    palette=(
+        "#60A5FA",  # blue
+        "#FB923C",  # orange
+        "#34D399",  # emerald
+        "#F87171",  # red
+        "#A78BFA",  # violet
+        "#F472B6",  # pink
+        "#2DD4BF",  # teal
+        "#FBBF24",  # amber
+        "#818CF8",  # indigo
+        "#A3E635",  # lime
+    ),
+)
+
+
+def _resolve_theme(theme: ThemeName) -> _Theme:
+    return _DARK if theme == "dark" else _LIGHT
 
 
 # ---------------------------------------------------------------------------
@@ -126,28 +183,35 @@ class Arrow3D(patches.FancyArrowPatch):
         return np.min(zs)  # type: ignore
 
 
-def _add_3d_turnaround_arrow(axes: Axes, arrays: list[npt.NDArray[np.float64]]) -> None:
+def _add_3d_turnaround_arrow(
+    axes: Axes, arrays: list[npt.NDArray[np.float64]], theme: _Theme
+) -> None:
     arrows = [a[-2:] for a in reversed(arrays)]
     a = Arrow3D(
-        *arrows[:3], mutation_scale=10, arrowstyle="-|>", color=_TURNAROUND_COLOUR
+        *arrows[:3], mutation_scale=10, arrowstyle="-|>", color=theme.turnaround
     )
     axes.add_artist(a)
 
 
-def _get_boundaries(spec: Spec[Any, Any, Any]) -> Iterator[patches.Patch]:
-    """Region-boundary overlays: a soft fill wash plus a solid coloured edge.
+def _get_boundaries(
+    spec: Spec[Any, Any, Any], theme: _Theme
+) -> Iterator[patches.Patch]:
+    """Region-boundary overlays: a soft fill wash plus a crisp coloured edge.
 
-    An outline alone (1.x's ``fill=False``) reads as just a black circle
-    when the enclosed path has no detector stream of its own to colour it
-    (e.g. a bare ``Ellipse``/``Polygon`` with no ``Acquire`` wrapping it) --
-    the fill gives the region presence even then.
+    An outline alone (1.x's ``fill=False``) reads as just a dark circle when
+    the enclosed path has no detector stream of its own to colour it (e.g. a
+    bare ``Ellipse``/``Polygon`` with no ``Acquire`` wrapping it). Fill and
+    edge opacity are set independently via RGBA tuples rather than the
+    patch-level ``alpha`` (which would scale both together) -- the edge
+    stays crisp and clearly visible even though the fill is a faint wash.
     """
+    fill_rgba = (*_hex_to_rgb(theme.boundary), 0.16)
+    edge_rgba = (*_hex_to_rgb(theme.boundary), 0.9)
     patch_kwargs: dict[str, Any] = {
         "fill": True,
-        "facecolor": _BOUNDARY_COLOUR,
-        "alpha": 0.1,
-        "edgecolor": _BOUNDARY_COLOUR,
-        "linewidth": 1.8,
+        "facecolor": fill_rgba,
+        "edgecolor": edge_rgba,
+        "linewidth": 2.0,
     }
     if isinstance(spec, Ellipse):
         xy = spec.x_centre, spec.y_centre
@@ -161,7 +225,12 @@ def _get_boundaries(spec: Spec[Any, Any, Any]) -> Iterator[patches.Patch]:
         for name in type(spec).model_fields:
             s = getattr(spec, name)
             if isinstance(s, Spec):
-                yield from _get_boundaries(s)  # type: ignore[reportUnknownArgumentType]
+                yield from _get_boundaries(s, theme)  # type: ignore[reportUnknownArgumentType]
+
+
+def _hex_to_rgb(colour: str) -> tuple[float, float, float]:
+    c = colour.lstrip("#")
+    return tuple(int(c[i : i + 2], 16) / 255 for i in (0, 2, 4))  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -204,11 +273,11 @@ def _detector_stream_map(scan: Scan[Any, Any, Any]) -> dict[Any, str]:
     return mapping
 
 
-def _stream_colours(scan: Scan[Any, Any, Any]) -> dict[str, str]:
+def _stream_colours(scan: Scan[Any, Any, Any], theme: _Theme) -> dict[str, str]:
     names: list[str] = [s.name for s in scan.windowed_streams] + [
         s.name for s in scan.continuous_streams
     ]
-    palette = cycle(_PALETTE)
+    palette = cycle(theme.palette)
     seen: dict[str, str] = {}
     for name in names:
         if name not in seen:
@@ -231,7 +300,9 @@ def _window_streams(
     return frozenset(streams)
 
 
-def _window_colour(streams: frozenset[str], stream_colours: dict[str, str]) -> str:
+def _window_colour(
+    streams: frozenset[str], stream_colours: dict[str, str], theme: _Theme
+) -> str:
     """One representative colour for a window's active stream set.
 
     Multi-stream windows (simultaneous streams) currently fall back to the
@@ -240,7 +311,7 @@ def _window_colour(streams: frozenset[str], stream_colours: dict[str, str]) -> s
     limitation of the data available.
     """
     if not streams:
-        return _NO_STREAM_COLOUR
+        return theme.no_stream
     return stream_colours[sorted(streams)[0]]
 
 
@@ -308,6 +379,7 @@ def plot_scan(
     title: str | None = None,
     spec: Spec[Any, Any, Any] | None = None,
     max_trigger_markers: int = DEFAULT_MAX_TRIGGER_MARKERS,
+    theme: ThemeName = "light",
 ) -> Figure:
     """Plot a compiled Scan: path (top) + trigger timeline (bottom).
 
@@ -322,11 +394,15 @@ def plot_scan(
     *spec*: when given, overlays ``Ellipse``/``Polygon`` region boundaries
     found in the spec tree onto the path panel (meaningless for a bare Scan,
     which retains no spec tree).
+
+    *theme*: ``"light"`` (default, for print/publication) or ``"dark"``
+    (for a dashboard/GUI context).
     """
+    th = _resolve_theme(theme)
     axis_labels = _flatten_axes(scan)
     ndims = len(axis_labels)
     detector_to_stream = _detector_stream_map(scan)
-    stream_colours = _stream_colours(scan)
+    stream_colours = _stream_colours(scan, th)
     has_timeline = bool(scan.windowed_streams or scan.continuous_streams)
 
     owns_figure = fig is None
@@ -351,10 +427,10 @@ def plot_scan(
         timeline_axes = None
 
     _style_path_axes(path_axes, ndims, axis_labels)
-    _set_title(fig, title or _default_title(axis_labels))
+    _set_title(fig, title or _default_title(axis_labels), th)
 
     if spec is not None and ndims <= 2:
-        for patch in _get_boundaries(spec):
+        for patch in _get_boundaries(spec, th):
             path_axes.add_patch(patch)
 
     _draw_path(
@@ -364,11 +440,12 @@ def plot_scan(
         detector_to_stream,
         stream_colours,
         max_trigger_markers,
+        th,
     )
     if timeline_axes is not None:
-        _draw_timeline(fig, timeline_axes, scan, detector_to_stream, stream_colours)
+        _draw_timeline(fig, timeline_axes, scan, detector_to_stream, stream_colours, th)
 
-    _apply_modern_style(fig)
+    _apply_modern_style(fig, th)
     if owns_figure:
         plt.show()  # type: ignore
     return fig
@@ -380,6 +457,7 @@ def plot_spec(
     fig: Figure | None = None,
     title: str | None = None,
     max_trigger_markers: int = DEFAULT_MAX_TRIGGER_MARKERS,
+    theme: ThemeName = "light",
 ) -> Figure:
     """Compile *spec* and plot it (path + timeline) with region boundaries.
 
@@ -392,6 +470,7 @@ def plot_spec(
         title=title,
         spec=spec,
         max_trigger_markers=max_trigger_markers,
+        theme=theme,
     )
 
 
@@ -402,12 +481,14 @@ def plot_path(
     title: str | None = None,
     spec: Spec[Any, Any, Any] | None = None,
     max_trigger_markers: int = DEFAULT_MAX_TRIGGER_MARKERS,
+    theme: ThemeName = "light",
 ) -> Figure:
     """Plot only the motion path — see ``plot_scan``'s path panel."""
+    th = _resolve_theme(theme)
     axis_labels = _flatten_axes(scan)
     ndims = len(axis_labels)
     detector_to_stream = _detector_stream_map(scan)
-    stream_colours = _stream_colours(scan)
+    stream_colours = _stream_colours(scan, th)
 
     owns_figure = fig is None
     if fig is None:
@@ -416,10 +497,10 @@ def plot_path(
         )
     axes = _make_path_axes(fig, ndims)
     _style_path_axes(axes, ndims, axis_labels)
-    _set_title(fig, title or _default_title(axis_labels))
+    _set_title(fig, title or _default_title(axis_labels), th)
 
     if spec is not None and ndims <= 2:
-        for patch in _get_boundaries(spec):
+        for patch in _get_boundaries(spec, th):
             axes.add_patch(patch)
 
     _draw_path(
@@ -429,8 +510,9 @@ def plot_path(
         detector_to_stream,
         stream_colours,
         max_trigger_markers,
+        th,
     )
-    _apply_modern_style(fig)
+    _apply_modern_style(fig, th)
     if owns_figure:
         plt.show()  # type: ignore
     return fig
@@ -441,22 +523,24 @@ def plot_timeline(
     *,
     fig: Figure | None = None,
     title: str | None = None,
+    theme: ThemeName = "light",
 ) -> Figure:
     """Plot only the trigger timeline (Gantt-style, one row per stream).
 
     See ``plot_scan``.
     """
+    th = _resolve_theme(theme)
     detector_to_stream = _detector_stream_map(scan)
-    stream_colours = _stream_colours(scan)
+    stream_colours = _stream_colours(scan, th)
 
     owns_figure = fig is None
     if fig is None:
         fig = plt.figure(figsize=(8, 3), layout="constrained")  # type: ignore
     axes = fig.add_subplot()
-    _set_title(fig, title or "Trigger timeline")
+    _set_title(fig, title or "Trigger timeline", th)
 
-    _draw_timeline(fig, axes, scan, detector_to_stream, stream_colours)
-    _apply_modern_style(fig)
+    _draw_timeline(fig, axes, scan, detector_to_stream, stream_colours, th)
+    _apply_modern_style(fig, th)
     if owns_figure:
         plt.show()  # type: ignore
     return fig
@@ -466,31 +550,47 @@ def _default_title(axis_labels: list[Any]) -> str:
     return f"Scan[{', '.join(str(a) for a in axis_labels)}]"
 
 
-def _set_title(fig: Figure, text: str) -> None:
-    fig.suptitle(text, fontsize=13, fontweight="bold", color=_INK)  # type: ignore
+def _set_title(fig: Figure, text: str, theme: _Theme) -> None:
+    fig.suptitle(text, fontsize=13, fontweight="bold", color=theme.ink)  # type: ignore
 
 
-def _apply_modern_style(fig: Figure) -> None:
+def _apply_modern_style(fig: Figure, theme: _Theme) -> None:
     """Light, uncluttered chrome: no top/right spines, soft grid, muted ink."""
-    fig.patch.set_facecolor(_FIG_BG)
+    fig.patch.set_facecolor(theme.fig_bg)
     for axes in fig.axes:
-        axes.set_facecolor(_AXES_BG)
-        for side in ("top", "right"):
-            axes.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            axes.spines[side].set_color(_MUTED_INK)
-            axes.spines[side].set_linewidth(0.8)
-        axes.tick_params(colors=_MUTED_INK, labelsize=9)  # type: ignore
-        axes.title.set_color(_INK)
-        axes.xaxis.label.set_color(_MUTED_INK)
-        axes.yaxis.label.set_color(_MUTED_INK)
+        axes.set_facecolor(theme.axes_bg)
+        if axes.name == "3d":
+            _style_3d_axes(axes, theme)
+        else:
+            for side in ("top", "right"):
+                axes.spines[side].set_visible(False)
+            for side in ("left", "bottom"):
+                axes.spines[side].set_color(theme.muted_ink)
+                axes.spines[side].set_linewidth(0.8)
+            axes.grid(True, color=theme.grid, linewidth=0.8)  # type: ignore
+        axes.tick_params(colors=theme.muted_ink, labelsize=9, length=0)  # type: ignore
+        axes.title.set_color(theme.ink)
+        axes.xaxis.label.set_color(theme.muted_ink)
+        axes.yaxis.label.set_color(theme.muted_ink)
         axes.set_axisbelow(True)
-        axes.grid(True, color=_GRID, linewidth=0.8)  # type: ignore
         legend = axes.get_legend()
         if legend is not None:
+            legend.get_frame().set_facecolor(theme.axes_bg)
             legend.get_frame().set_alpha(0.9)
-            legend.get_frame().set_edgecolor(_GRID)
+            legend.get_frame().set_edgecolor(theme.grid)
             legend.get_frame().set_linewidth(0.8)
+            for text in legend.get_texts():
+                text.set_color(theme.ink)
+
+
+def _style_3d_axes(axes: Axes, theme: _Theme) -> None:
+    """``Axes3D`` panes/grid live in a separate API from 2D spines/grid."""
+    for axis in (axes.xaxis, axes.yaxis, axes.zaxis):  # type: ignore[attr-defined]
+        axis.set_pane_color(theme.axes_bg)  # type: ignore
+        # No public API for the 3D grid-line colour as of matplotlib 3.10.
+        axis._axinfo["grid"].update(color=theme.grid, linewidth=0.6)  # type: ignore  # noqa: SLF001
+    if hasattr(axes, "zaxis"):
+        axes.zaxis.label.set_color(theme.muted_ink)  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -565,13 +665,14 @@ def _draw_path(
     detector_to_stream: dict[Any, str],
     stream_colours: dict[str, str],
     max_trigger_markers: int,
+    theme: _Theme,
 ) -> None:
     """Draw the motion path, turnarounds, trigger markers and legend onto *axes*."""
     trigger_markers = _draw_path_and_streams(
-        axes, scan, axis_labels, detector_to_stream, stream_colours
+        axes, scan, axis_labels, detector_to_stream, stream_colours, theme
     )
     if len(trigger_markers) <= max_trigger_markers:
-        _draw_trigger_markers(axes, trigger_markers)
+        _draw_trigger_markers(axes, trigger_markers, theme)
     _draw_stream_legend(axes, stream_colours)
 
 
@@ -581,6 +682,7 @@ def _draw_path_and_streams(
     axis_labels: list[Any],
     detector_to_stream: dict[Any, str],
     stream_colours: dict[str, str],
+    theme: _Theme,
 ) -> list[tuple[dict[Any, float], str, float]]:
     """Draw the motion path window by window; collect trigger markers.
 
@@ -602,7 +704,7 @@ def _draw_path_and_streams(
         window_points = _window_points(window, axis_labels, last)
         start_pos = window_points[0]
         colour = _window_colour(
-            _window_streams(window, detector_to_stream), stream_colours
+            _window_streams(window, detector_to_stream), stream_colours, theme
         )
 
         if not first_window:
@@ -613,17 +715,17 @@ def _draw_path_and_streams(
                 for ax in axis_labels
             )
             if gap:
-                _draw_turnaround(axes, axis_labels, last, start_pos)
+                _draw_turnaround(axes, axis_labels, last, start_pos, theme)
             else:
-                _draw_segment(axes, axis_labels, [last, start_pos], colour)
+                _draw_segment(axes, axis_labels, [last, start_pos], colour, theme)
 
-        _draw_segment(axes, axis_labels, window_points, colour)
+        _draw_segment(axes, axis_labels, window_points, colour, theme)
 
         for ts in window.trigger_sequences:
             for t, det, livetime in _trigger_marker_times(ts):
                 stream = detector_to_stream.get(det)
                 marker_colour = (
-                    stream_colours.get(stream, "black") if stream else "black"
+                    stream_colours.get(stream, theme.ink) if stream else theme.ink
                 )
                 if window.moving_axes and not window.non_linear:
                     frac = 0.0 if window.duration == 0 else t / window.duration
@@ -666,25 +768,35 @@ def _draw_segment(
     axis_labels: list[Any],
     points: list[dict[Any, float]],
     colour: str,
+    theme: _Theme,
 ) -> None:
-    """Draw a straight line through *points* (or a single marker for one point)."""
+    """Draw a straight line through *points* (or a single marker for one point).
+
+    Each is drawn twice: a wide, low-alpha "glow" pass underneath, then the
+    crisp solid line/marker on top -- a cheap way to give the path some
+    visual depth instead of a single flat stroke.
+    """
     if len(points) == 1:
         arrays = [np.array([points[0].get(ax, 0.0)]) for ax in axis_labels] or [
             np.zeros(1)
         ]
+        _plot_arrays(axes, arrays, marker="o", markersize=16, color=colour, alpha=0.25)
         _plot_arrays(
             axes,
             arrays,
             marker="o",
             markersize=6,
             color=colour,
-            markeredgecolor="white",
-            markeredgewidth=0.6,
+            markeredgecolor=theme.axes_bg,
+            markeredgewidth=0.8,
         )
         return
     arrays = [np.array([p.get(ax, 0.0) for p in points]) for ax in axis_labels] or [
         np.zeros(len(points))
     ]
+    _plot_arrays(
+        axes, arrays, color=colour, linewidth=6.0, alpha=0.12, solid_capstyle="round"
+    )
     _plot_arrays(
         axes, arrays, color=colour, linewidth=2.4, alpha=0.95, solid_capstyle="round"
     )
@@ -695,6 +807,7 @@ def _draw_turnaround(
     axis_labels: list[Any],
     from_pos: dict[Any, float],
     to_pos: dict[Any, float],
+    theme: _Theme,
 ) -> None:
     """Bridge a position discontinuity between runs.
 
@@ -719,7 +832,7 @@ def _draw_turnaround(
             connectionstyle="arc3,rad=0.25",
             arrowstyle="-|>",
             mutation_scale=10,
-            color=_TURNAROUND_COLOUR,
+            color=theme.turnaround,
             linestyle="--",
             linewidth=1.2,
         )
@@ -734,12 +847,14 @@ def _draw_turnaround(
         )
         for ax in axis_labels
     ]
-    _plot_arrays(axes, arrays, color=_TURNAROUND_COLOUR, linestyle="--")
-    _add_3d_turnaround_arrow(axes, arrays)
+    _plot_arrays(axes, arrays, color=theme.turnaround, linestyle="--")
+    _add_3d_turnaround_arrow(axes, arrays, theme)
 
 
 def _draw_trigger_markers(
-    axes: Axes, trigger_markers: list[tuple[dict[Any, float], str, float]]
+    axes: Axes,
+    trigger_markers: list[tuple[dict[Any, float], str, float]],
+    theme: _Theme,
 ) -> None:
     """Scatter every trigger instant, sized by livetime and coloured by stream."""
     if not trigger_markers:
@@ -750,14 +865,15 @@ def _draw_trigger_markers(
     ] or [np.zeros(len(trigger_markers))]
     face_colours = [m[1] for m in trigger_markers]
     sizes = np.array([_marker_size(m[2]) for m in trigger_markers]) ** 2
-    # A thin white edge lifts markers off the path line/grid behind them
-    # instead of blending into it -- a cheap "halo" for visual pop.
+    # An edge matching the axes background lifts markers off the path
+    # line/grid behind them instead of blending into it -- a cheap "halo"
+    # that works in both light and dark themes.
     kwargs: dict[str, Any] = {
         "c": face_colours,
         "s": sizes,
         "alpha": 0.9,
-        "edgecolors": "white",
-        "linewidths": 0.6,
+        "edgecolors": theme.axes_bg,
+        "linewidths": 0.7,
     }
     if len(per_axis) > 2:
         axes.scatter3D(per_axis[2], per_axis[1], per_axis[0], **kwargs)  # type: ignore
@@ -794,6 +910,7 @@ def _collect_timeline_rows(
     scan: Scan[Any, Any, Any],
     detector_to_stream: dict[Any, str],
     stream_colours: dict[str, str],
+    theme: _Theme,
 ) -> tuple[
     list[str],
     dict[str, str],
@@ -829,7 +946,7 @@ def _collect_timeline_rows(
         for ts in window.trigger_sequences:
             parent_stream = detector_to_stream.get(next(iter(ts.detectors), None))
             parent_key = parent_stream or "?"
-            parent_colour = stream_colours.get(parent_key, "black")
+            parent_colour = stream_colours.get(parent_key, theme.ink)
             _ensure_row(parent_key, parent_colour, True)
 
             parent_period = 0.0
@@ -881,6 +998,7 @@ def _draw_timeline(
     scan: Scan[Any, Any, Any],
     detector_to_stream: dict[Any, str],
     stream_colours: dict[str, str],
+    theme: _Theme,
 ) -> bool:
     """Draw a Gantt-style trigger timeline onto *axes*.
 
@@ -888,7 +1006,7 @@ def _draw_timeline(
     nothing to show.
     """
     row_order, row_colour, row_is_parent, full_by_row, live_by_row = (
-        _collect_timeline_rows(scan, detector_to_stream, stream_colours)
+        _collect_timeline_rows(scan, detector_to_stream, stream_colours, theme)
     )
     if not row_order:
         axes.text(  # type: ignore
@@ -897,7 +1015,7 @@ def _draw_timeline(
             "no detector triggering",
             ha="center",
             va="center",
-            color="grey",
+            color=theme.empty_state,
             transform=axes.transAxes,
         )
         axes.set_xticks([])  # type: ignore
@@ -908,7 +1026,7 @@ def _draw_timeline(
     for i, key in enumerate(row_order):
         y = n - 1 - i
         if i % 2 == 1:
-            axes.axhspan(y - 0.5, y + 0.5, color=_ROW_BAND, zorder=0)  # type: ignore
+            axes.axhspan(y - 0.5, y + 0.5, color=theme.row_band, zorder=0)  # type: ignore
         height = 0.6 if row_is_parent[key] else 0.4
         colour = row_colour[key]
         full = full_by_row[key]

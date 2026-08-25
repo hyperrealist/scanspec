@@ -245,3 +245,40 @@ def test_plot_spec_without_fig_creates_and_shows_one():
     assert isinstance(fig, Figure)
     assert len(fig.axes) == 1
     mock_show.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# theme="light"/"dark"
+# ---------------------------------------------------------------------------
+
+
+def test_dark_theme_uses_a_dark_figure_background():
+    light = plot_spec(Linspace("x", 0, 1, 5), fig=Figure(), theme="light")
+    dark = plot_spec(Linspace("x", 0, 1, 5), fig=Figure(), theme="dark")
+    # Luminance check rather than an exact colour match: light theme's
+    # background should be much brighter than dark theme's.
+    light_luminance = np.asarray(light.get_facecolor())[:3].sum()
+    dark_luminance = np.asarray(dark.get_facecolor())[:3].sum()
+    assert light_luminance > dark_luminance
+
+
+def test_dark_theme_uses_a_different_stream_palette():
+    spec = _flagship_multi_stream_spec()
+    light = plot_spec(spec, fig=Figure(), theme="light", max_trigger_markers=0)
+    dark = plot_spec(spec, fig=Figure(), theme="dark", max_trigger_markers=0)
+    light_legend = light.axes[0].get_legend()
+    dark_legend = dark.axes[0].get_legend()
+    assert light_legend is not None
+    assert dark_legend is not None
+    light_colours = {t.get_color() for t in light_legend.get_texts()}
+    dark_colours = {t.get_color() for t in dark_legend.get_texts()}
+    assert light_colours != dark_colours
+
+
+def test_dark_theme_3d_panes_match_axes_background():
+    """Axes3D panes are a separate colour API from the 2D facecolor/spines."""
+    spec3d = Linspace("z", 1, 3, 3) * Spiral("x", 0, 5, 2, "y", 10, 5)
+    fig = plot_path(spec3d.compile(), fig=Figure(), theme="dark")
+    axes = fig.axes[0]
+    pane_colour = axes.xaxis.pane.get_facecolor()  # type: ignore[reportAttributeAccessIssue]
+    assert pane_colour[:3] == axes.get_facecolor()[:3]
