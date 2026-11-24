@@ -4,7 +4,7 @@ Date: 2026-06-26
 
 ## Status
 
-Accepted
+Accepted (Decision 1's types superseded by ADR 0008 Decisions 5-6; Decision 5's algorithm superseded by its own addendum)
 
 ## Context
 

@@ -452,9 +452,9 @@ class Dimension(Generic[AxisT]):
 class Window(Generic[AxisT, DetectorT]):
     """A contiguous stretch of motion during which detectors are triggered.
 
-    Windows are separated by turnarounds. scanspec provides boundary kinematics
-    so the caller can compute the turnaround trajectory externally via
-    calculate_turnaround.
+    Windows are separated by gaps. scanspec provides boundary kinematics
+    so the caller can compute the gap trajectory externally via
+    calculate_gap.
 
     ``trigger_sequences`` is an ordered list; entries execute one after
     another within the window. In a multi-stream scan a window may contain
@@ -801,7 +801,9 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
     """Compiled output of Spec.compile().
 
     O(spec complexity) to construct -- no position arrays allocated until
-    setpoints() or __iter__ is called.
+    ``__iter__`` or a window's ``positions()`` is called, except for the
+    masked-grid primitives (``Ellipse``, ``Polygon``), which materialise
+    their point set at compile.
 
     Serves as the sole entry point for both window iteration and analysis.
 

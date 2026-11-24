@@ -13,8 +13,13 @@ from __future__ import annotations
 
 from typing import Never, assert_type
 
-from scanspec.v2.core import MonitorStream, TriggerGroup
-from scanspec.v2.specs import Linspace, Monitors, Sync
+from scanspec.v2.core import (
+    ContinuousStream,
+    DetectorGroup,
+    MonitorStream,
+    TriggerGroup,
+)
+from scanspec.v2.specs import ContinuousStreams, Linspace, Monitors, Sync
 
 # ---------------------------------------------------------------------------
 # Inference assertions
@@ -69,3 +74,41 @@ def test_monitor_t_inferred_from_monitors() -> None:
         monitors=[MonitorStream("dcm_temp", "dcm_temperature")],
     )
     assert_type(spec, Monitors[str, str, str])
+
+
+def test_monitor_and_detector_t_inferred_through_continuous_streams() -> None:
+    """Pyright infers all three type arguments through ``ContinuousStreams``.
+
+    DetectorT comes from the ``ContinuousStream`` detector groups and MonitorT
+    from the inner ``Monitors`` wrapper; no annotation is needed.
+    """
+    spec = ContinuousStreams(
+        Monitors(
+            Sync(
+                motion,
+                trigger_group=TriggerGroup(
+                    detectors=frozenset({"saxs", "waxs"}),
+                    exposures_per_collection=1,
+                    collections_per_event=1,
+                    livetime=0.003,
+                    deadtime=0.001,
+                ),
+            ),
+            monitors=[MonitorStream("dcm_temp", "dcm_temperature")],
+        ),
+        continuous_streams=[
+            ContinuousStream(
+                "cameras",
+                [
+                    DetectorGroup(
+                        exposures_per_collection=1,
+                        collections_per_event=1,
+                        livetime=0.048,
+                        deadtime=0.001,
+                        detectors=["front_cam", "side_cam"],
+                    )
+                ],
+            )
+        ],
+    )
+    assert_type(spec, ContinuousStreams[str, str, str])

@@ -4,7 +4,7 @@ Date: 2026-04-23
 
 ## Status
 
-Accepted
+Accepted (partially superseded: trigger fields by ADRs 0007/0008, `Acquire` by `Sync` in ADR 0009; sources and concat child stacks per `src/scanspec/v2/core.py`)
 
 ## Context
 

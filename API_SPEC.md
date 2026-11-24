@@ -20,7 +20,7 @@ Three type parameters are used throughout:
   Only appears on `Spec` and `Scan` — never on `Window`.
 
 `Spec[AxisT, DetectorT, MonitorT]` — base class for all scan specs.
-`Sync[AxisT, DetectorT, MonitorT]` — concrete `Spec` subclass: wraps a motion spec + binds detector triggering, producing a single windowed stream.
+`Sync[AxisT, DetectorT, MonitorT]` — concrete `Spec` subclass: wraps a motion spec + binds detector triggering, producing one windowed stream when it has a `trigger_group` and none otherwise.
 `Monitors[AxisT, DetectorT, MonitorT]` / `ContinuousStreams[AxisT, DetectorT, MonitorT]` — outermost wrapper `Spec` subclasses (ADR 0009) that attach scan-wide monitors / continuous streams to the whole compiled tree.
 `Scan[AxisT, DetectorT, MonitorT]` — compiled output of `spec.compile()`; iterable, yielding `Window` objects.
 `WindowedStream[AxisT, DetectorT]` — one named detector stream within a `Scan`: dimensions + detector groups.
@@ -80,8 +80,8 @@ class TriggerSequence(Generic[DetectorT]):
     other and from root.detectors (checked at compile time).
 
     Window.trigger_sequences is an ordered list; entries execute one after
-    another within the window. Compiled specs always produce a single-entry
-    list -- multi-entry lists (the variable-spacing spacer pattern) only
+    another within the window. Compiled specs always produce a list of at most
+    one entry -- multi-entry lists (the variable-spacing spacer pattern) only
     arise via manually-constructed Window objects.
     """
 
@@ -168,9 +168,9 @@ class AxisMotion:
 class Window(Generic[AxisT, DetectorT]):
     """A contiguous stretch of motion during which detectors are triggered.
 
-    Windows are separated by turnarounds. scanspec provides boundary kinematics
-    so the caller can compute the turnaround trajectory externally via
-    calculate_turnaround.
+    Windows are separated by gaps. scanspec provides boundary kinematics
+    so the caller can compute the gap trajectory externally via
+    calculate_gap.
 
     trigger_sequences is an ordered sequential list; entries execute one
     after another within the window. In a multi-stream scan a window may
@@ -337,14 +337,17 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
     """Compiled output of Spec.compile().
 
     O(spec complexity) to construct — no position arrays allocated until
-    setpoints() or iteration is called.
+    iteration or a window's positions() is called, except for the
+    masked-grid primitives (Ellipse, Polygon), which materialise their
+    point set at compile.
 
     Iterable: ``for window in scan`` yields one ``Window`` per collection
     point (step scan) or per sweep (fly scan).  Also the sole entry point
     for analysis via ``scan.windowed_streams``.
     """
     # One or more named window-aligned detector streams, each with its own
-    # dimensions.  A single Sync always produces exactly one stream;
+    # dimensions.  A Sync with a trigger_group produces exactly one stream
+    # (a Sync without one produces none);
     # Concat of Syncs with different stream_names produces one per name.
     windowed_streams: list[WindowedStream[AxisT, DetectorT]]
 
@@ -413,7 +416,8 @@ compiles it into a `Scan`.
 ```python
 spec: Spec[str, str, str]  # provided by orchestrator — typically an Sync
 
-# Compile once — O(spec complexity), no position arrays allocated.
+# Compile once — O(spec complexity); no position arrays allocated
+# (masked-grid primitives Ellipse/Polygon excepted).
 scan: Scan[str, str, str] = spec.compile()
 
 # Configure triggered detectors before the scan starts.
@@ -484,7 +488,7 @@ step-scan windows).
 
 Each window is a single point; `moving_axes` is always empty (`scan.has_moving_axes`
 is `False`). Detector triggering comes from `window.trigger_sequences`, one
-entry per top-level detector group.
+entry per top-level detector group (the list is empty for a Sync without a `trigger_group`).
 
 ```python
 async def run_step_scan(spec: Spec[str, str, str]) -> None:
@@ -512,8 +516,9 @@ One sequence table per collection window. The orchestrator supplies `scan`,
 the exact set of `detector_names` this PandA sequence handles, the trigger
 type, and motor position outputs — all hardware configuration, not from spec.
 One SEQ block per `TriggerSequence`: the root config occupies the block; each
-parallel child (a multi-rate sub-group, ADR 0007 Decision 2) needs an
-additional SEQ block, wired by the caller — worked example below.
+further parallel child (a multi-rate sub-group, ADR 0007 Decision 2) needs
+an additional SEQ block, wired by the caller; the root and its first child
+share one block — worked example below.
 
 ```python
 async def run_panda_flyscan(
@@ -563,8 +568,8 @@ async def run_panda_flyscan(
 
 #### Worked example: a chained pair of SEQ blocks (two children)
 
-Concrete instance of "each parallel child needs an additional SEQ block,
-wired by the caller": a SAXS+WAXS parent with two children, PandA and
+Concrete instance of "each further parallel child needs an additional SEQ
+block, wired by the caller": a SAXS+WAXS parent with two children, PandA and
 Tetramm (ADR 0007 Decision 2). The first child shares the parent's SEQ
 block (a block's two output channels fit a parent+one-child pair); each
 further child gets its own block, chained by wiring the previous block's
@@ -710,7 +715,7 @@ Positions at servo cycle rate (e.g. 0.2ms), consumed in chunks the caller
 chooses. `window.positions(times)` is a pure function of the `times` array
 given — no generator, no chunking built in; scanspec never materializes more
 than the array it is handed. Between windows the caller drives the
-turnaround using boundary kinematics from adjacent windows.
+gap using boundary kinematics from adjacent windows.
 
 ```python
 async def run_pmac_flyscan(
@@ -725,7 +730,7 @@ async def run_pmac_flyscan(
         if prev_window is not None:
             prev = prev_window.moving_axes
             curr = window.moving_axes
-            bridge = calculate_turnaround(
+            bridge = calculate_gap(
                 {a: m.end_position   for a, m in prev.items()},
                 {a: m.end_velocity   for a, m in prev.items()},
                 {a: m.start_position for a, m in curr.items()},
@@ -817,7 +822,7 @@ for stream in scan.windowed_streams:
 # DetectorGroup(["timestamp", "x_enc", "y_enc"]):  collections_per_event=10 -> shape (50, 100, 10)
 
 # Example: spiral scan — x and y share one dimension
-# scan.windowed_streams[0].dimensions == [Dimension(axes=["x", "y"], length=5000, snake=False)]
+# scan.windowed_streams[0].dimensions == [Dimension(axes=["y", "x"], length=5000, snake=False)]
 x_coords = next(scan.windowed_streams[0].dimensions[0].setpoints("x"))   # shape (5000,)
 y_coords = next(scan.windowed_streams[0].dimensions[0].setpoints("y"))   # shape (5000,)
 ```
@@ -875,7 +880,7 @@ Operators available on any spec node:
 
 | Expression | Result | Meaning |
 |------------|--------|---------|
-| `a * b`    | `Product(b, a)` — outer × inner | b is fast axis, a is slow |
+| `a * b`    | `Product(a, b)` — outer × inner | a is slow axis, b is fast |
 | `~a`       | `Snake(a)` | reverse alternate repeats of a |
 | `a.zip(b)` | `Zip(a, b)` | interleave axes of a and b |
 | `a.concat(b)` | `Concat(a, b)` | concatenate a then b |
@@ -910,7 +915,7 @@ own stream, `Sync(a).concat(Sync(~b, stream_name="b"))`. Snaking the whole
 for a given windowed stream. It takes a pure motion spec
 (`Spec[AxisT, Never, Never]`) and binds detector triggering and fly/step
 mode via `trigger_group`, producing a `Spec[AxisT, DetectorT, MonitorT]`
-with exactly one windowed stream, named `stream_name` (default
+with one windowed stream (none if it has no `trigger_group`), named `stream_name` (default
 `"primary"`). `fly=True` means the innermost motion dimension sweeps
 continuously (flyscan); all outer dimensions are stepped. `fly=False`
 (default) is a software step scan.
@@ -1100,14 +1105,16 @@ See `tests/scanspec/v2/test_type_inference.py` for pyright assertions.
 ### `spec.compile()` — producing `Scan`
 
 `scan = spec.compile()` compiles the spec into a `Scan`. This is
-O(spec complexity) — no position arrays are allocated.
+O(spec complexity) — no position arrays are allocated (except for the
+masked-grid primitives `Ellipse` and `Polygon`, which materialise their
+point set at compile).
 
 `Scan` is iterable and the sole entry point for analysis:
 
 ```python
 scan: Scan[str, str, str] = spec.compile()
 
-# For a single Sync, exactly one windowed stream is produced.
+# A Sync with a trigger_group produces exactly one windowed stream.
 assert len(scan.windowed_streams) == 1
 assert scan.windowed_streams[0].name == "primary"
 assert scan.has_moving_axes == True                  # flyscan — innermost sweeps
@@ -1131,10 +1138,8 @@ energy_axis = Linspace("energy", 7.0, 7.1, 20)
 xy_motion   = Product(Linspace("y", 0, 5, 50), ~Linspace("x", 0, 10, 100))
 full_motion = energy_axis * xy_motion   # 20 energy steps × 50 rows = 1000 windows
 
-# No explicit Sync[...] annotation needed -- trigger_group= pins DetectorT
-# directly (unlike the Repeat/Concat chain above). MonitorT still needs
-# the explicit Monitors[...] annotation below (see type-inference caveat).
-sync: Sync[str, str, str] = Sync(
+# Pyright infers Sync[str, str, Never] -- no annotation needed.
+sync = Sync(
     full_motion,
     fly=True,           # innermost dimension (x) sweeps continuously
     stream_name="primary",
@@ -1168,7 +1173,8 @@ sync: Sync[str, str, str] = Sync(
 
 # continuous_streams/monitors attach via the outermost wrappers (ADR 0009),
 # not on Sync itself. Nesting order between the two doesn't matter.
-spec: ContinuousStreams[str, str, str] = ContinuousStreams(
+# Pyright infers ContinuousStreams[str, str, str] -- no annotation needed.
+spec = ContinuousStreams(
     Monitors(
         sync,
         monitors=[
@@ -1231,6 +1237,9 @@ ADR 0008):
 - The group's own `detectors` and every `followers` entry's detector sets
   must be pairwise disjoint.
 
+**At `Sync` construction time**: `duration` together with a `trigger_group`
+raises `ValueError`.
+
 **At `Sync.compile()` time**:
 
 - The group's own `livetime`/`deadtime` must be concrete (not `None`) —
@@ -1245,8 +1254,6 @@ ADR 0008):
   each follower's total duration must not exceed the group's own livetime
   (`validate_trigger_sequence`, checked against the derived
   `TriggerSequence` regardless of where `repeats` came from).
-- If `duration` is given explicitly and is less than the detector-derived
-  per-point duration: raises `ValueError`.
 
 **At `Monitors.compile()` / `ContinuousStreams.compile()` time** (ADR
 0009):
@@ -1267,10 +1274,10 @@ ADR 0008):
   `Monitors`/`ContinuousStreams` wrapper, or a windowed stream nested
   inside one) is rejected — those must be attached via the outermost
   `Monitors`/`ContinuousStreams` wrapper, never inside a combinator.
-- Any `Spec` subclass with detectors is always the outermost node for its
-  stream and cannot be nested inside `Product` or `Zip` without losing its
-  `windowed_streams` (see Motion spec composition above) — use `Concat`
-  instead.
+
+**At `Product`/`Zip`/`Snake` construction time**: a `Sync` anywhere beneath
+them raises `ValueError` (see Motion spec composition above) — use `Concat`
+to combine `Sync`s.
 
 ### Serialization
 

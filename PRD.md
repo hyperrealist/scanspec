@@ -13,7 +13,7 @@ Relationship to other documents:
 - **API_SPEC.md** — annotated code examples of the consumption API. Where the
   two disagree, the *code* in `src/scanspec/v2/` plus this PRD reflect the
   most recent decisions; API_SPEC.md is updated to match (see §10).
-- **ADRs 0001–0007** — all accepted; see `docs/explanations/decisions/` for
+- **ADRs 0001–0009** — all accepted; see `docs/explanations/decisions/` for
   supersession detail between them (several are partially or fully
   superseded by later ADRs in the set).
 - Working documents (PRD.md, API_SPEC.md) are deleted or folded into `docs/`
@@ -117,7 +117,8 @@ All are in scope for 2.0; they may be delivered in stages.
 ### Non-functional requirements
 
 - **Memory**: deserialization and `compile()` are O(spec complexity), never
-  O(scan size). Position arrays are generated on demand, in chunks, from
+  O(scan size), except for the masked-grid primitives (`Ellipse`, `Polygon`),
+  which materialise their point set at compile. Position arrays are generated on demand, in chunks, from
   numpy-enabled functions.
 - **Step scans remain first-class**: the same compiled object drives
   software step scans, not just flyscans.
@@ -242,7 +243,8 @@ scan = spec.compile()
 ### 3.2 The compiled `Scan` (`src/scanspec/v2/core.py`)
 
 `Scan` is the sole entry point for execution *and* analysis. Construction is
-O(spec complexity). It holds:
+O(spec complexity) (except `Ellipse`/`Polygon`, which materialise their
+point set at compile). It holds:
 
 - `generators: list[WindowGenerator]` — internal motion engines, outer →
   inner (ADR 0004). Only the innermost generator can fly. Sources are
@@ -417,7 +419,7 @@ detector is therefore externally gated by the root, never free-running.
 `Window.trigger_sequences` is an **ordered sequential list**; there are no
 parallel sibling streams within a window (no zipping of unrelated trigger
 streams with no common checkpoint base). Compiled specs always produce a
-single-entry list — a spec-facing authoring surface for the
+list of at most one entry — a spec-facing authoring surface for the
 variable-spacing spacer pattern (§4.2) is not required for 2.0 (§2.5, §11)
 — so multi-entry lists, including that pattern, only arise via manual
 `Window` construction.
@@ -599,10 +601,6 @@ each window's `root.repeats` by the matching child's `repeats`.
    forward if a story ever needs it: give `TriggerSequence` the stream name
    it feeds, so attribution no longer goes through the detector, then drop
    the uniqueness check across windowed streams.
-4. **`Scan.non_linear` treats piecewise-linear motion as non-linear.** It's
-   a source-type check, so a flown concatenation of linear segments reports
-   `True`. Each window's own `non_linear` is precise, and the scan-wide
-   value errs on the safe side (a trajectory controller is selected).
 
 **Intentionally dropped from 1.x** (rationale in ADR 0003): `Path`,
 `Midpoints`, `Slice`, `Squash`, `Mask`/regions, `Fly`, `ConstantDuration`,

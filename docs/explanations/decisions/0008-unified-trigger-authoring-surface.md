@@ -355,17 +355,14 @@ carve-out for these types.
 
 ## Consequences
 
-**Implementation status**: Decisions 1-3's `TriggerGroup`/`TriggerFollower`
-merge (replacing the first implemented two-type `TriggerGroup`+
-`TriggerPlan` design) and the repeats/livetime/deadtime-all-required
-compile-time policy are design-accepted but **not yet implemented** as of
-this amendment — Decisions 4-6 (compiled-side shapes, `DetectorGroup`
-handling) are already implemented, under the original design, and are
-unaffected by this amendment. `scanspec.v2` has no external consumers yet
-(it only becomes `scanspec` at the final 2.0 migration, PRD §12), so none
-of this carries release/backward-compatibility weight — the code changes
-below describe the remaining delta from what is currently in
-`core.py`/`specs.py` to what Decisions 1-3 now describe.
+**Implementation status**: Decisions 1-6 are all implemented. The merged
+`TriggerGroup`/`TriggerFollower` (Decisions 1-3) replaced the original
+two-type `TriggerGroup`+`TriggerPlan` design, and the
+repeats/livetime/deadtime-all-required compile-time policy is enforced.
+`scanspec.v2` has no external consumers yet (it only becomes `scanspec` at
+the final 2.0 migration, PRD §12), so none of this carried
+release/backward-compatibility weight. The code changes below record the
+delta from the earlier design to the current `core.py`/`specs.py`.
 
 ### Code changes required
 

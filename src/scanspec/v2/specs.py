@@ -196,12 +196,13 @@ class Spec(BaseModel, Generic[AxisT, DetectorT, MonitorT], metaclass=PosargsMeta
 
     ``arbitrary_types_allowed`` is required because ``MonitorT`` defaults to
     ``Never`` (PEP 696) so pyright can infer it when a bare ``Sync(...)``
-    is constructed with no ``monitors=``; pydantic-core cannot generate a
-    schema for ``Never`` itself when a subclass is built unparametrized
+    is constructed without a ``Monitors`` wrapper; pydantic-core cannot
+    generate a schema for ``Never`` itself when a subclass is built
+    unparametrized
     (e.g. ``Zip(left=self, right=other)`` inside the combinator methods
     below), and this is the fix pydantic's own error message recommends.
     Concretely-parametrized construction (``Sync[str, str, str](...)``,
-    or inference from a real ``monitors=`` value) is unaffected -- full
+    or inference from a concrete ``Monitors`` wrapper) is unaffected -- full
     validation still applies there.
     """
 
@@ -466,7 +467,7 @@ class Spiral(Spec[AxisT, Never, Never]):
 
 
 # ---------------------------------------------------------------------------
-# Combinators — accept any Spec (including Sync)
+# Combinators (only Concat and Repeat may contain a Sync)
 # ---------------------------------------------------------------------------
 
 
@@ -1191,7 +1192,7 @@ class Sync(Spec[AxisT, DetectorT, MonitorT]):
     """Binds detector triggering to a motion spec.
 
     ``spec`` must be pure motion: combine several ``Sync``s with ``Concat``,
-    never by nesting them or placing them under ``Product``/``Zip``.
+    never by nesting them or placing them under ``Product``/``Zip``/``Snake``.
     """
 
     spec: AnySpec[AxisT, Any, Any] = Field(description="Motion spec.")
@@ -1306,8 +1307,8 @@ class Sync(Spec[AxisT, DetectorT, MonitorT]):
 
         For step scans (1 window per setpoint) this equals total window
         duration. For fly scans the total window duration is
-        ``per_point * inner_length``; ``Scan.__iter__`` multiplies
-        automatically.
+        ``per_point * inner_length``; ``WindowGenerator``
+        multiplies automatically.
         """
         if not trigger_sequences:
             return self.duration

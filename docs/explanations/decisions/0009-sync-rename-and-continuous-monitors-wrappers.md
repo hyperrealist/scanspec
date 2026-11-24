@@ -4,7 +4,7 @@ Date: 2026-09-17
 
 ## Status
 
-Accepted
+Accepted (the `trigger_plan` field was later renamed `trigger_group`; see the ADR 0008 amendment)
 
 ## Context
 
@@ -54,7 +54,7 @@ class Monitors(Spec[AxisT, DetectorT, MonitorT]):
 
     def compile(self) -> Scan[AxisT, DetectorT, MonitorT]:
         scan = self.spec.compile()
-        _reject_continuous_and_monitors(scan, "Monitors")
+        _reject_existing_monitors(scan)
         scan.monitors = list(self.monitors)
         return scan
 
@@ -67,7 +67,7 @@ class ContinuousStreams(Spec[AxisT, DetectorT, MonitorT]):
 
     def compile(self) -> Scan[AxisT, DetectorT, MonitorT]:
         scan = self.spec.compile()
-        _reject_continuous_and_monitors(scan, "ContinuousStreams")
+        _reject_existing_continuous_streams(scan)
         scan.continuous_streams = list(self.continuous_streams)
         return scan
 ```
