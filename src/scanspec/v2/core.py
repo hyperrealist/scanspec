@@ -627,6 +627,76 @@ def _window_generators(
             yield gen
 
 
+def _live_repeats(sequences: list[TriggerSequence[DetectorT]]) -> int:
+    """Root-level repeats that count toward ``trigger_index`` (non-blank ones)."""
+    return sum(seq.root.repeats for seq in sequences if seq.root.livetime != 0.0)
+
+
+def _trailing_blanks(
+    sequences: list[TriggerSequence[DetectorT]],
+) -> list[TriggerSequence[DetectorT]]:
+    """The blank sequences after the last live one (all of them if none is live)."""
+    trailing: list[TriggerSequence[DetectorT]] = []
+    for seq in sequences:
+        trailing = trailing + [seq] if seq.root.livetime == 0.0 else []
+    return trailing
+
+
+def _in_progress_repeat(
+    sequences: list[TriggerSequence[DetectorT]],
+    trigger_index: int,
+) -> tuple[TriggerRepeat[DetectorT], int] | None:
+    """The live root repeat *trigger_index* stops inside, and how far into it.
+
+    None when *trigger_index* falls on a boundary between sequences (or
+    after the last one), so no sequence is part-way done.
+    """
+    remaining = trigger_index
+    for seq in sequences:
+        if seq.root.livetime == 0.0:
+            continue
+        if remaining < seq.root.repeats:
+            return (seq.root, remaining) if remaining > 0 else None
+        remaining -= seq.root.repeats
+    return None
+
+
+def _advanced_window(
+    window: Window[AxisT, DetectorT], fraction: float
+) -> Window[AxisT, DetectorT]:
+    """*window* restarted *fraction* of the way through its sweep.
+
+    Shifts ``positions`` by the elapsed time and re-derives each axis's start
+    position and velocity there, so the window reads as a fresh sweep over
+    the remaining part. Assumes the live repeats are spread evenly over the
+    sweep, which is true of every window ``compile()`` produces.
+    """
+    elapsed = fraction * window.duration
+    eps = 1e-6 * window.duration
+
+    def positions_fn(times: np.ndarray) -> dict[AxisT, np.ndarray]:
+        return window.positions(times + elapsed)
+
+    around = window.positions(np.array([elapsed - eps, elapsed, elapsed + eps]))
+    return Window(
+        static_axes=window.static_axes,
+        moving_axes={
+            axis: AxisMotion(
+                start_position=float(around[axis][1]),
+                start_velocity=float((around[axis][2] - around[axis][0]) / (2 * eps)),
+                end_position=motion.end_position,
+                end_velocity=motion.end_velocity,
+            )
+            for axis, motion in window.moving_axes.items()
+        },
+        non_linear=window.non_linear,
+        duration=window.duration - elapsed,
+        trigger_sequences=window.trigger_sequences,
+        previous=window.previous,
+        positions_fn=positions_fn,
+    )
+
+
 def _truncate_trigger_sequence(
     sequences: list[TriggerSequence[DetectorT]],
     trigger_index: int,
@@ -764,8 +834,19 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
         """Return a new Scan that starts iteration at the given window.
 
         Used for pause/resume -- construct a new Scan from a known progress
-        point rather than rewinding an existing iterator.
+        point rather than rewinding an existing iterator. The first yielded
+        window reads like the first window of a fresh scan holding only the
+        remaining work (see ``__iter__``). *trigger_index* counts completed
+        root-level trigger repeats of window *window*; it must fall on an
+        event boundary, and equal to the window's repeats it means "start at
+        the next window", after replaying any blank the window ends in. A
+        start past the end of the scan raises on iteration; exactly at the
+        end it yields nothing.
         """
+        if window < 0 or trigger_index < 0:
+            raise ValueError(
+                f"window and trigger_index must be >= 0, got {window}, {trigger_index}"
+            )
         return Scan(
             generators=self.generators,
             windowed_streams=self.windowed_streams,
@@ -807,6 +888,80 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
             if ax not in previous or previous[ax] != pos
         }
 
+    def _exposures_per_event(self, detectors: frozenset[DetectorT]) -> int:
+        """``exposures_per_event`` of the detector group firing *detectors*."""
+        for stream in self.windowed_streams:
+            for group in stream.detector_groups:
+                if frozenset(group.detectors) == detectors:
+                    return group.exposures_per_event
+        raise ValueError(
+            f"no detector group fires {sorted(str(d) for d in detectors)}, so "
+            "the trigger_index can't be checked against its event boundaries"
+        )
+
+    def _resume_window(
+        self, window: Window[AxisT, DetectorT], window_idx: int, trigger_index: int
+    ) -> Window[AxisT, DetectorT] | None:
+        """*window* with *trigger_index* completed root repeats truncated off.
+
+        When *trigger_index* equals its live repeats every exposure is done.
+        If the window ends in blanks, the pause may have landed in them, so
+        they are replayed like any other blank: the result holds only them,
+        with the moving axes held at their end positions as static axes.
+        Otherwise returns None, so iteration resumes at the next window.
+        Raises when *trigger_index* can't be a checkpoint of this window: it
+        has no live repeats, *trigger_index* is past them, or it stops part
+        way through an event.  A moving window's motion is advanced to the
+        resume point.
+        """
+        live = _live_repeats(window.trigger_sequences)
+        if live == 0:
+            raise ValueError(
+                f"trigger_index={trigger_index} given for window {window_idx}, "
+                "which has no trigger repeats to count it against"
+            )
+        if trigger_index > live:
+            raise ValueError(
+                f"trigger_index={trigger_index} is past the {live} trigger "
+                f"repeats of window {window_idx}"
+            )
+        if trigger_index == live:
+            trailing = _trailing_blanks(window.trigger_sequences)
+            if not trailing:
+                return None
+            ends = {axis: m.end_position for axis, m in window.moving_axes.items()}
+            return Window(
+                static_axes={**window.static_axes, **ends},
+                moving_axes={},
+                non_linear=False,
+                duration=trigger_sequences_duration(trailing),
+                trigger_sequences=trailing,
+                previous=window.previous,
+            )
+        in_progress = _in_progress_repeat(window.trigger_sequences, trigger_index)
+        if in_progress is not None:
+            root, done = in_progress
+            per_event = self._exposures_per_event(root.detectors)
+            if done % per_event:
+                raise ValueError(
+                    f"trigger_index={trigger_index} stops part way through an "
+                    f"event of window {window_idx} ({per_event} exposures per "
+                    "event); resume only at an event boundary"
+                )
+        if window.moving_axes:
+            if len(window.trigger_sequences) != 1:
+                raise ValueError(
+                    f"cannot resume part way through moving window {window_idx}: "
+                    "its trigger sequences are not one even sweep"
+                )
+            window = _advanced_window(window, trigger_index / live)
+        window.trigger_sequences = _truncate_trigger_sequence(
+            window.trigger_sequences, trigger_index
+        )
+        if not window.moving_axes:
+            window.duration = trigger_sequences_duration(window.trigger_sequences)
+        return window
+
     def __iter__(self) -> Iterator[Window[AxisT, DetectorT]]:
         """Iterate collection windows.
 
@@ -816,11 +971,12 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
         yields the actual collection windows.
 
         ``previous`` and ``static_axes`` are set by mutating the inner Window
-        before yielding it.  The first yielded window carries every static
-        axis, also when resuming via ``with_start``; later windows carry only
-        the axes that changed.  On the first yielded window, if
-        ``_trigger_index`` is set, the window's ``trigger_sequences`` are
-        truncated to remove completed root-level repeats.
+        before yielding it.  Later windows carry only the axes that changed.
+        The first yielded window carries every static axis and has
+        ``previous=None``, also when resuming via ``with_start``: nothing is
+        known about where a resumed scan's axes are, so it reads like the
+        first window of a fresh scan.  ``_trigger_index`` is applied to it
+        by ``_resume_window``.
         """
         gens = self.generators
         if not gens:
@@ -830,33 +986,46 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
         prev_all: dict[AxisT, float] = {}
         window_idx = 0
         first_yielded = True
+        trigger_index = self._trigger_index
 
         for inner_window, outer_pos in _iter_with_outer(gens, 0, 0):
             all_pos: dict[AxisT, float] = dict(outer_pos)
             all_pos.update(inner_window.static_axes)
 
-            inner_window.previous = prev_window
-
             if window_idx >= self._start_window and first_yielded:
-                # Nothing is known about where a resumed scan's axes are.
+                inner_window.previous = None
                 inner_window.static_axes = all_pos
+                resumed: Window[AxisT, DetectorT] | None = inner_window
+                if trigger_index > 0:
+                    resumed = self._resume_window(
+                        inner_window, window_idx, trigger_index
+                    )
+                    trigger_index = 0
+                if resumed is not None:
+                    inner_window = resumed
+                    # A replayed trailing blank holds the moving axes static.
+                    all_pos = dict(inner_window.static_axes)
+                    first_yielded = False
+                    yield inner_window
             else:
+                inner_window.previous = prev_window
                 inner_window.static_axes = self._changed_axes(all_pos, prev_all)
-
-            if window_idx >= self._start_window:
-                if first_yielded and self._trigger_index > 0:
-                    inner_window.trigger_sequences = _truncate_trigger_sequence(
-                        inner_window.trigger_sequences,
-                        self._trigger_index,
-                    )
-                    inner_window.duration = trigger_sequences_duration(
-                        inner_window.trigger_sequences
-                    )
-                first_yielded = False
-                yield inner_window
+                if window_idx >= self._start_window:
+                    yield inner_window
 
             prev_all = dict(all_pos)
             for axis, am in inner_window.moving_axes.items():
                 prev_all[axis] = am.end_position
             prev_window = inner_window
             window_idx += 1
+
+        # The start window was never reached (it alone resets trigger_index).
+        # Exactly at the end, with_start(N, 0), is a finished scan; past it
+        # is a bad checkpoint.
+        if window_idx < self._start_window or (
+            window_idx == self._start_window and trigger_index > 0
+        ):
+            raise ValueError(
+                f"with_start({self._start_window}, {self._trigger_index}) is "
+                f"past the end of the scan, which has {window_idx} windows"
+            )

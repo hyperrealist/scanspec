@@ -10,10 +10,12 @@ import pytest
 from scanspec.v2.core import (
     AxisMotion,
     DetectorGroup,
+    LinearSource,
     Scan,
     TriggerFollower,
     TriggerGroup,
     TriggerRepeat,
+    TriggerSequence,
     Window,
     WindowGenerator,
 )
@@ -868,6 +870,193 @@ def test_with_start_trigger_index_truncates():
     ts = windows_list[0].trigger_sequences[0]
     assert ts.root.repeats == 7  # 10 - 3 = 7
     assert ts.root.detectors == frozenset({"det"})
+
+
+# Linspace("x", 0, 10, 10) flown: boundary index i is at x = (i - 0.5) * 10/9.
+# With _RESUME_TG one point is one 0.004 s repeat, so the sweep moves at
+# (10/9) / 0.004 = 277.78 per second.
+_RESUME_TG = TriggerGroup(
+    detectors=frozenset({"det"}),
+    exposures_per_collection=1,
+    collections_per_event=1,
+    livetime=0.003,
+    deadtime=0.001,
+)
+
+
+def _fly_x(
+    outer: Spec[str, Never, Never] | None = None,
+    trigger_group: TriggerGroup[str] = _RESUME_TG,
+) -> Scan[str, str, Never]:
+    x = Linspace("x", 0.0, 10.0, 10)
+    motion = x if outer is None else outer * ~x
+    return Sync(motion, fly=True, trigger_group=trigger_group).compile()  # type: ignore[reportUnknownVariableType]
+
+
+def test_with_start_mid_fly_window_starts_at_resume_point():
+    (w,) = windows(_fly_x().with_start(0, 3))
+    assert w.duration == pytest.approx(0.028)  # type: ignore[reportUnknownMemberType]
+    assert w.moving_axes["x"].start_position == pytest.approx(25 / 9)  # type: ignore[reportUnknownMemberType]  # X(3)
+    assert w.moving_axes["x"].start_velocity == pytest.approx(2500 / 9)  # type: ignore[reportUnknownMemberType]
+    assert w.moving_axes["x"].end_position == pytest.approx(95 / 9)  # type: ignore[reportUnknownMemberType]  # X(10)
+    pos = w.positions(np.array([0.0, 0.002, 0.028]))["x"]
+    assert pos == pytest.approx([25 / 9, 30 / 9, 95 / 9])  # type: ignore[reportUnknownMemberType]  # X(3), X(3.5), X(10)
+
+
+def test_with_start_mid_reversed_fly_window_starts_at_resume_point():
+    # Window 1 of y(2) * ~x runs x backwards, from X(10) to X(0).
+    (w,) = windows(_fly_x(Linspace("y", 0.0, 1.0, 2)).with_start(1, 3))
+    assert w.moving_axes["x"].start_position == pytest.approx(65 / 9)  # type: ignore[reportUnknownMemberType]  # X(7)
+    assert w.moving_axes["x"].start_velocity == pytest.approx(-2500 / 9)  # type: ignore[reportUnknownMemberType]
+    assert w.moving_axes["x"].end_position == pytest.approx(-5 / 9)  # type: ignore[reportUnknownMemberType]  # X(0)
+    assert w.positions(np.array([0.028]))["x"] == pytest.approx([-5 / 9])  # type: ignore[reportUnknownMemberType]
+
+
+def test_with_start_resume_window_has_no_previous():
+    sc = (Linspace("y", 0.0, 2.0, 3) * Linspace("x", 0.0, 3.0, 4)).compile()
+    resumed = windows(sc.with_start(window=5))
+    assert resumed[0].previous is None
+    assert resumed[1].previous is resumed[0]
+
+
+def test_with_start_mid_fly_window_has_no_previous():
+    resumed = windows(_fly_x(Linspace("y", 0.0, 1.0, 2)).with_start(1, 3))
+    assert resumed[0].previous is None
+
+
+def test_with_start_trigger_index_at_window_end_starts_next_window():
+    sc = _fly_x(Linspace("y", 0.0, 1.0, 2))
+    (w,) = windows(sc.with_start(0, 10))
+    assert w.static_axes == {"y": 1.0}
+    assert w.previous is None
+    assert w.duration == pytest.approx(0.04)  # type: ignore[reportUnknownMemberType]
+    assert w.moving_axes["x"].start_position == pytest.approx(95 / 9)  # type: ignore[reportUnknownMemberType]
+    assert w.trigger_sequences[0].root.repeats == 10
+
+
+def test_with_start_trigger_index_at_last_window_end_is_empty():
+    assert windows(_fly_x().with_start(0, 10)) == []
+
+
+def test_with_start_trigger_index_past_window_end_raises():
+    with pytest.raises(ValueError, match="past the 10 trigger repeats of window 0"):
+        windows(_fly_x().with_start(0, 11))
+
+
+def test_with_start_trigger_index_without_trigger_repeats_raises():
+    fly: Sync[str, Never, Never] = Sync(
+        Linspace("x", 0.0, 10.0, 10), fly=True, duration=0.05
+    )
+    with pytest.raises(ValueError, match="no trigger repeats"):
+        windows(fly.compile().with_start(0, 3))
+    step: Sync[str, Never, Never] = Sync(Linspace("x", 0.0, 10.0, 3), duration=0.5)
+    with pytest.raises(ValueError, match="no trigger repeats"):
+        windows(step.compile().with_start(1, 1))
+
+
+def test_with_start_trigger_index_must_fall_on_event_boundary():
+    # Two exposures per event: 20 repeats of 0.004 s for 10 points.
+    tg = _RESUME_TG.model_copy(update={"exposures_per_collection": 2})
+    sc = _fly_x(trigger_group=tg)
+    with pytest.raises(ValueError, match="part way through an event"):
+        windows(sc.with_start(0, 3))
+    (w,) = windows(sc.with_start(0, 4))  # 2 points done
+    assert w.duration == pytest.approx(0.064)  # type: ignore[reportUnknownMemberType]  # 16 * 0.004
+    assert w.moving_axes["x"].start_position == pytest.approx(15 / 9)  # type: ignore[reportUnknownMemberType]  # X(2)
+    assert w.trigger_sequences[0].root.repeats == 16
+
+
+def _seq(repeats: int, livetime: float, deadtime: float) -> TriggerSequence[str]:
+    root = TriggerRepeat(frozenset({"det"}), repeats, livetime, deadtime)
+    return TriggerSequence(root=root, children=[])
+
+
+# Hand-built (compile() makes no blanks): 3 live, 0.01 s blank, 2 live,
+# then a trailing 0.02 s blank.
+_TRAILING_BLANK = _seq(1, 0.0, 0.02)
+_SPACED = [_seq(3, 0.003, 0.001), _seq(1, 0.0, 0.01), _seq(2, 0.003, 0.001)]
+
+
+def test_with_start_at_live_end_replays_trailing_blank():
+    seqs = [*_SPACED, _TRAILING_BLANK]
+    gen = WindowGenerator(
+        axes=["x"],
+        length=2,
+        source=LinearSource({"x": (0.0, 1.0)}, 2),
+        trigger_sequences=seqs,
+    )
+    w0, w1 = windows(Scan[str, str, Never](generators=[gen]).with_start(0, 5))
+    # A pause in the trailing blank reads trigger_index == 5 live repeats;
+    # like any blank, it is replayed in full, alone.
+    assert w0.trigger_sequences == [_TRAILING_BLANK]
+    assert w0.duration == pytest.approx(0.02)  # type: ignore[reportUnknownMemberType]
+    assert w0.static_axes == {"x": 0.0}
+    assert w0.previous is None
+    assert w1.static_axes == {"x": 1.0}
+    assert w1.trigger_sequences == seqs
+    assert w1.previous is w0
+
+
+def test_with_start_at_live_end_without_trailing_blank_skips_window():
+    gen = WindowGenerator(
+        axes=["x"],
+        length=2,
+        source=LinearSource({"x": (0.0, 1.0)}, 2),
+        trigger_sequences=_SPACED,
+    )
+    # The 0.01 s blank sits before the last live burst, so it isn't replayed.
+    (w,) = windows(Scan[str, str, Never](generators=[gen]).with_start(0, 5))
+    assert w.static_axes == {"x": 1.0}
+    assert w.trigger_sequences == _SPACED
+
+
+def test_with_start_fly_trailing_blank_holds_axes_at_sweep_end():
+    outer = WindowGenerator(
+        axes=["y"], length=2, source=LinearSource({"y": (0.0, 1.0)}, 2)
+    )
+    fly = WindowGenerator(
+        axes=["x"],
+        length=10,
+        source=LinearSource({"x": (0.0, 9.0)}, 10),
+        fly=True,
+        trigger_sequences=[_seq(10, 0.003, 0.001), _TRAILING_BLANK],
+        duration=0.06,
+    )
+    w0, w1 = windows(Scan[str, str, Never](generators=[outer, fly]).with_start(0, 10))
+    # No motion: x waits at its sweep end, half a step past the last point.
+    assert w0.moving_axes == {}
+    assert w0.static_axes == pytest.approx({"y": 0.0, "x": 9.5})  # type: ignore[reportUnknownMemberType]
+    assert w0.trigger_sequences == [_TRAILING_BLANK]
+    assert w0.duration == pytest.approx(0.02)  # type: ignore[reportUnknownMemberType]
+    assert w1.static_axes == {"y": 1.0}
+    assert w1.moving_axes["x"].start_position == pytest.approx(-0.5)  # type: ignore[reportUnknownMemberType]
+    assert w1.previous is w0
+
+
+def test_with_start_exactly_at_end_is_empty():
+    sc = Linspace("x", 0.0, 10.0, 5).compile()  # 5 step windows
+    assert windows(sc.with_start(5)) == []
+    assert windows(_fly_x().with_start(1)) == []  # 1 fly window
+
+
+def test_with_start_past_end_raises():
+    sc = Linspace("x", 0.0, 10.0, 5).compile()
+    with pytest.raises(ValueError, match=r"with_start\(6, 0\) is past the end"):
+        windows(sc.with_start(6))
+    # At the end window index, a non-zero trigger_index is still past the end.
+    with pytest.raises(ValueError, match="which has 5 windows"):
+        windows(sc.with_start(5, 1))
+    # The past-end check wins even when trigger_index is invalid as well.
+    with pytest.raises(ValueError, match=r"with_start\(5, 99\) is past the end"):
+        windows(_fly_x().with_start(5, 99))
+
+
+def test_with_start_negative_raises():
+    sc = Linspace("x", 0.0, 10.0, 5).compile()
+    with pytest.raises(ValueError, match=">= 0"):
+        sc.with_start(-1)
+    with pytest.raises(ValueError, match=">= 0"):
+        sc.with_start(0, -1)
 
 
 # ---------------------------------------------------------------------------

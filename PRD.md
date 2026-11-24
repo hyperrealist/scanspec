@@ -276,7 +276,7 @@ to execute one collection phase:
 | `non_linear: bool` | `True` → trajectory controller required (servo-rate positions). `False` → constant velocity per axis (or no motion). Computed analytically from the position functions, not by finite-differencing. |
 | `duration: float` | Total window time in seconds, derived from trigger timing (§4). |
 | `trigger_sequences` | Detector triggering for this window (§4). |
-| `previous: Window \| None` | One step back only — enough to compute the gap into this window. |
+| `previous: Window \| None` | One step back only — enough to compute the gap into this window. `None` on the first window, including the first window after `with_start`. |
 
 `window.positions(times: np.ndarray) -> dict[axis, np.ndarray]` returns
 positions for the moving axes at each given real-second time, computed
@@ -471,6 +471,28 @@ Principles (agreed, ADR 0007 context):
   `trigger_index` repeats truncated off its trigger sequences and its
   `duration` reduced accordingly. There is no rewind method and no mutable
   iterator state.
+- **A resumed window reads like the first window of a fresh scan** holding
+  only the remaining work: it carries every static axis, its `previous` is
+  `None` (the axes may be anywhere after a pause, so the consumer moves
+  from their actual positions), and a fly window's motion starts at the
+  resume point, `trigger_index / repeats` of the way through its sweep.
+  `trigger_index` must be a real checkpoint of the window, or iteration
+  raises (on the first `next()`; `with_start` itself checks only that both
+  arguments are `>= 0`): the window must have trigger repeats, the index
+  must not pass them, and it must fall on an event boundary (a multiple of
+  `exposures_per_event` into the in-progress sequence), since a fresh scan
+  can't start part way through an event. An index equal to the window's
+  repeats means every exposure is done: iteration resumes at the next window,
+  as `with_start(window + 1)` would — unless the window ends in a blank,
+  which the pause may have landed in. Like any blank, it is replayed in
+  full: the first yielded window holds only the trailing blank(s), with no
+  moving axes (a fly window's axes wait at their sweep end, as static
+  axes). The hardware has no notion of a window; the consumer keeps the
+  window count, and must pass the window whose rows the sequencer was
+  executing when it stalled: a stall in window k's trailing blank is
+  `with_start(k, live)`, not `with_start(k + 1, 0)`. A checkpoint exactly at the end of the
+  scan (`with_start(N)` for N windows, or the last window's full repeats)
+  yields nothing; one past the end raises.
 - **Blank/spacer repeats (`livetime == 0.0`) never count toward
   `trigger_index`, and are never truncated** — a pause landing anywhere in a
   blank always replays it in full on resume. Gaps are minimum requirements

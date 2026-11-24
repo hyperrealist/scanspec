@@ -382,11 +382,18 @@ class Scan(Generic[AxisT, DetectorT, MonitorT]):
         """Return a new Scan that starts iteration at the given window.
 
         The first yielded window has its first `trigger_index` root-level
-        trigger repeats truncated off its trigger_sequences, and its
-        duration reduced to match. Its static_axes carry every static axis,
-        not just those changed since the skipped window. Used for pause/resume — constructs a new
-        Scan from a known progress point rather than rewinding an existing
-        iterator.
+        trigger repeats truncated off its trigger_sequences, its duration
+        reduced to match, and (for a fly window) its motion started at the
+        resume point. It reads like the first window of a fresh scan: its
+        static_axes carry every static axis and its previous is None.
+        `trigger_index` must fall on an event boundary within the window's
+        repeats, or iteration raises; equal to the repeats, it resumes at
+        the next window, after replaying any blank the window ends in (a
+        blank-only first window, with no moving axes). A start exactly at
+        the end of the scan yields nothing; past the end, iteration raises.
+        Used for pause/resume —
+        constructs a new Scan from a known progress point rather than
+        rewinding an existing iterator.
         """
         ...
 
@@ -757,7 +764,8 @@ async def resume_after_pause(
     return scan.with_start(window=window_index, trigger_index=trigger_index)
     # Pass to run_panda_flyscan / run_pmac_flyscan as normal -- the first
     # yielded window already has its first `trigger_index` root-level
-    # repeats truncated off trigger_sequences, and duration reduced to match.
+    # repeats truncated off trigger_sequences, duration reduced to match,
+    # motion starting at the resume point, and previous=None.
 ```
 
 ---
